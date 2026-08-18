@@ -43,7 +43,7 @@ import argparse
 from datetime import datetime
 
 try:
-    from dhanhq import dhanhq
+    from dhanhq import dhanhq, DhanContext
 except ImportError:
     print("Missing dependency. Run: pip install dhanhq")
     sys.exit(1)
@@ -64,7 +64,8 @@ def get_client():
     if not client_id or not access_token:
         log("ERROR: Set DHAN_CLIENT_ID and DHAN_ACCESS_TOKEN environment variables first.")
         sys.exit(1)
-    return dhanhq(client_id, access_token)
+    dhan_context = DhanContext(client_id, access_token)
+    return dhanhq(dhan_context)
 
 
 def get_today_pnl(dhan, debug=False):
