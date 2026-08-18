@@ -1,0 +1,45 @@
+name: Dhan Trading Guard
+
+on:
+  schedule:
+    - cron: "*/5 3-23 * * 1-5"
+    - cron: "*/5 0-18 * * 2-6"
+  workflow_dispatch: {}
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install dhanhq
+
+      - name: Run guard check
+        env:
+          DHAN_CLIENT_ID: ${{ secrets.DHAN_CLIENT_ID }}
+          DHAN_ACCESS_TOKEN: ${{ secrets.DHAN_ACCESS_TOKEN }}
+        run: |
+          python3 dhan_trading_guard.py \
+            --once \
+            --capital ${{ vars.GUARD_CAPITAL || '45000' }} \
+            --loss-pct ${{ vars.GUARD_LOSS_PCT || '5' }} \
+            --max-trades ${{ vars.GUARD_MAX_TRADES || '2' }} \
+            --state-file guard_state.json \
+            ${{ vars.GUARD_DRY_RUN == 'false' && ' ' || '--dry-run' }}
+
+      - name: Commit updated state file
+        run: |
+          git config user.name "trading-guard-bot"
+          git config user.email "actions@users.noreply.github.com"
+          git add guard_state.json
+          git diff --quiet --cached || git commit -m "Update guard state [skip ci]"
+          git push
