@@ -203,6 +203,36 @@ class TradingGuard:
             except Exception as e:
                 log(f"ERROR placing square-off order for {sid}: {e}")
 
+    def _activate_kill_switch_permanently(self, dhan):
+        """Activates the kill switch, then immediately deactivates and
+        reactivates it - burning the one self-deactivation Dhan allows per
+        day right away, automatically, instead of leaving it sitting there
+        for the rest of the day as something that could be used to keep
+        trading. After this sequence, Dhan does not allow another manual
+        deactivation until the next trading day."""
+        try:
+            r1 = dhan.kill_switch("ACTIVATE")
+            log(f"Kill switch ACTIVATE (1st) result: {r1}")
+        except Exception as e:
+            log(f"ERROR on first kill switch activation: {e}")
+            log("This can happen if a position is still open - Dhan requires positions flat before the kill switch can activate. Enable --auto-square-off, or close the position manually, then this will succeed on the next check.")
+            return False
+
+        try:
+            r2 = dhan.kill_switch("DEACTIVATE")
+            log(f"Kill switch DEACTIVATE (burning the override) result: {r2}")
+        except Exception as e:
+            log(f"WARNING: could not deactivate to burn the override: {e}. Kill switch is still ACTIVE from the first call, which is the safe state - just not burned yet.")
+            return True
+
+        try:
+            r3 = dhan.kill_switch("ACTIVATE")
+            log(f"Kill switch ACTIVATE (2nd, override now burned for today) result: {r3}")
+        except Exception as e:
+            log(f"WARNING: could not re-activate after burning the override: {e}. Account may currently be UNLOCKED - check the Dhan app.")
+            return False
+        return True
+
     def poll(self, dhan, dry_run, debug):
         if self.locked:
             log(f"Already locked today ({self.lock_reason}). Nothing to do.")
@@ -236,10 +266,9 @@ class TradingGuard:
                     log("DRY RUN - would also auto square-off all open positions")
             else:
                 log(f"BREACH: {breach_reason}")
-                result = dhan.kill_switch("ACTIVATE")
-                log(f"Kill switch activation result: {result}")
                 if self.auto_square_off:
                     self.square_off_all(dhan, positions_raw, debug)
+                self._activate_kill_switch_permanently(dhan)
                 self.locked = True
                 self.lock_reason = breach_reason
             breached = True
