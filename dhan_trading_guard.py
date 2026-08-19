@@ -86,10 +86,18 @@ def get_today_pnl(dhan, debug=False):
 
 
 class TradingGuard:
-    """Holds state (trade count, which securities are already open, whether
-    today is already locked) so a fresh run - like a new GitHub Actions
-    invocation every few minutes - can pick up where the last one left off,
-    instead of forgetting everything and starting the day over each time."""
+    """Holds state (which securities have been traded today, whether today
+    is already locked) so a fresh run - like a new GitHub Actions invocation
+    every few minutes - can pick up where the last one left off, instead of
+    forgetting everything and starting the day over each time.
+
+    Trade counting: a security counts as "traded today" the moment it shows
+    ANY buy or sell activity (buyQty>0 or sellQty>0) in the day's position
+    data - not by catching it mid-open between two polls. A fast trade that
+    opens AND closes within one polling gap (very possible with intraday
+    options) would otherwise be invisible to a "was flat, now open" check -
+    this was found and fixed after a real trade tested this exact case and
+    the guard missed it entirely."""
 
     def __init__(self, capital, loss_pct, max_trades, auto_square_off=False,
                  state_file=None):
@@ -98,7 +106,7 @@ class TradingGuard:
         self.max_trades = max_trades
         self.auto_square_off = auto_square_off
         self.state_file = state_file
-        self.prev_qty = {}
+        self.seen_securities = []
         self.trade_count = 0
         self.locked = False
         self.lock_reason = ""
@@ -116,7 +124,7 @@ class TradingGuard:
         if data.get("date") != today_str():
             log(f"State file is from a previous day ({data.get('date')}) - starting today fresh.")
             return
-        self.prev_qty = data.get("prev_qty", {})
+        self.seen_securities = data.get("seen_securities", [])
         self.trade_count = data.get("trade_count", 0)
         self.locked = data.get("locked", False)
         self.lock_reason = data.get("lock_reason", "")
@@ -127,7 +135,7 @@ class TradingGuard:
             return
         data = {
             "date": today_str(),
-            "prev_qty": self.prev_qty,
+            "seen_securities": self.seen_securities,
             "trade_count": self.trade_count,
             "locked": self.locked,
             "lock_reason": self.lock_reason,
@@ -185,13 +193,13 @@ class TradingGuard:
             sell_qty = float(p.get("sellQty", 0) or 0)
             current_qty[sid] = buy_qty - sell_qty
             pnl += float(p.get("realizedProfit", 0) or 0) + float(p.get("unrealizedProfit", 0) or 0)
-
-        for sid, qty in current_qty.items():
-            was_flat = self.prev_qty.get(sid, 0) == 0
-            if was_flat and qty != 0:
+            # Count as traded the moment ANY activity shows up for this
+            # security today - not by catching it mid-open. A trade that
+            # opens and closes within one polling gap must still be caught.
+            if sid and (buy_qty > 0 or sell_qty > 0) and sid not in self.seen_securities:
+                self.seen_securities.append(sid)
                 self.trade_count += 1
                 log(f"New trade detected on security {sid} (trade {self.trade_count}/{self.max_trades})")
-        self.prev_qty = current_qty
 
         log(f"Trades today: {self.trade_count}/{self.max_trades} | P&L (realized+MTM): {pnl:.2f} | Loss limit: -{loss_limit:.2f}")
 
