@@ -85,19 +85,53 @@ def get_today_pnl(dhan, debug=False):
     return total
 
 
-class TradingGuard:
-    """Holds state (which securities have been traded today, whether today
-    is already locked) so a fresh run - like a new GitHub Actions invocation
-    every few minutes - can pick up where the last one left off, instead of
-    forgetting everything and starting the day over each time.
+def compute_today_trade_count(dhan, debug=False):
+    """Counts real round-trip trades from the day's individual fills
+    (trade book), not from the position snapshot. This is recomputed fresh
+    from the FULL day's fills every single check - not built up
+    incrementally - which fixes two real bugs found via live testing:
+      1. A trade that opens AND closes within one polling gap was
+         invisible to a position-snapshot-based check.
+      2. The SAME instrument traded twice in one day (two separate
+         round trips) only showed as one entry in the position snapshot,
+         since Dhan aggregates position data per security per day.
+    A "trade" here = a position going from flat (0) to non-flat, walked
+    chronologically through that security's fills for the day."""
+    resp = dhan.get_trade_book()
+    if debug:
+        log(f"DEBUG trade_book raw response: {resp}")
+    fills = resp.get("data", []) if isinstance(resp, dict) else []
 
-    Trade counting: a security counts as "traded today" the moment it shows
-    ANY buy or sell activity (buyQty>0 or sellQty>0) in the day's position
-    data - not by catching it mid-open between two polls. A fast trade that
-    opens AND closes within one polling gap (very possible with intraday
-    options) would otherwise be invisible to a "was flat, now open" check -
-    this was found and fixed after a real trade tested this exact case and
-    the guard missed it entirely."""
+    by_security = {}
+    for t in fills:
+        sid = t.get("securityId") or t.get("security_id")
+        qty = float(t.get("tradedQuantity") or t.get("traded_qty") or t.get("quantity") or 0)
+        txn = (t.get("transactionType") or t.get("transaction_type") or "").upper()
+        ts = (t.get("exchangeTime") or t.get("createTime") or t.get("create_time")
+              or t.get("updateTime") or t.get("tradeTime") or t.get("orderId") or "")
+        if not sid or qty == 0:
+            continue
+        signed_qty = qty if txn == "BUY" else -qty
+        by_security.setdefault(sid, []).append((ts, signed_qty))
+
+    trade_count = 0
+    for sid, sec_fills in by_security.items():
+        sec_fills.sort(key=lambda x: x[0])
+        running = 0.0
+        for ts, signed_qty in sec_fills:
+            was_flat = running == 0
+            running += signed_qty
+            if was_flat and running != 0:
+                trade_count += 1
+    return trade_count
+
+
+class TradingGuard:
+    """Holds state (only lock status now - trade count is recomputed fresh
+    from the trade book on every check, see compute_today_trade_count) so a
+    fresh run - like a new GitHub Actions invocation every few minutes -
+    knows whether today is already locked, instead of forgetting and
+    potentially re-evaluating after a lock should already hold."""
 
     def __init__(self, capital, loss_pct, max_trades, auto_square_off=False,
                  state_file=None):
@@ -106,7 +140,6 @@ class TradingGuard:
         self.max_trades = max_trades
         self.auto_square_off = auto_square_off
         self.state_file = state_file
-        self.seen_securities = []
         self.trade_count = 0
         self.locked = False
         self.lock_reason = ""
@@ -124,19 +157,15 @@ class TradingGuard:
         if data.get("date") != today_str():
             log(f"State file is from a previous day ({data.get('date')}) - starting today fresh.")
             return
-        self.seen_securities = data.get("seen_securities", [])
-        self.trade_count = data.get("trade_count", 0)
         self.locked = data.get("locked", False)
         self.lock_reason = data.get("lock_reason", "")
-        log(f"Loaded state: trades={self.trade_count}, locked={self.locked}")
+        log(f"Loaded state: locked={self.locked}")
 
     def _save_state(self):
         if not self.state_file:
             return
         data = {
             "date": today_str(),
-            "seen_securities": self.seen_securities,
-            "trade_count": self.trade_count,
             "locked": self.locked,
             "lock_reason": self.lock_reason,
         }
@@ -185,21 +214,11 @@ class TradingGuard:
             log(f"DEBUG positions raw response: {resp}")
         positions_raw = resp.get("data", []) if isinstance(resp, dict) else []
 
-        current_qty = {}
         pnl = 0.0
         for p in positions_raw:
-            sid = p.get("securityId") or p.get("security_id")
-            buy_qty = float(p.get("buyQty", 0) or 0)
-            sell_qty = float(p.get("sellQty", 0) or 0)
-            current_qty[sid] = buy_qty - sell_qty
             pnl += float(p.get("realizedProfit", 0) or 0) + float(p.get("unrealizedProfit", 0) or 0)
-            # Count as traded the moment ANY activity shows up for this
-            # security today - not by catching it mid-open. A trade that
-            # opens and closes within one polling gap must still be caught.
-            if sid and (buy_qty > 0 or sell_qty > 0) and sid not in self.seen_securities:
-                self.seen_securities.append(sid)
-                self.trade_count += 1
-                log(f"New trade detected on security {sid} (trade {self.trade_count}/{self.max_trades})")
+
+        self.trade_count = compute_today_trade_count(dhan, debug)
 
         log(f"Trades today: {self.trade_count}/{self.max_trades} | P&L (realized+MTM): {pnl:.2f} | Loss limit: -{loss_limit:.2f}")
 
