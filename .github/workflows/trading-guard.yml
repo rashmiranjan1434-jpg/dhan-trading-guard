@@ -16,6 +16,7 @@ on:
           - setup-pnl-exit
           - pnl-exit-status
           - remove-pnl-exit
+          - check-proxy-ip
 
 jobs:
   check:
@@ -53,6 +54,7 @@ jobs:
         env:
           DHAN_CLIENT_ID: ${{ secrets.DHAN_CLIENT_ID }}
           DHAN_ACCESS_TOKEN: ${{ secrets.DHAN_ACCESS_TOKEN }}
+          STATICIP_PROXY_URL: ${{ secrets.STATICIP_PROXY_URL }}
         run: |
           python3 dhan_trading_guard.py \
             --setup-pnl-exit \
@@ -64,6 +66,7 @@ jobs:
         env:
           DHAN_CLIENT_ID: ${{ secrets.DHAN_CLIENT_ID }}
           DHAN_ACCESS_TOKEN: ${{ secrets.DHAN_ACCESS_TOKEN }}
+          STATICIP_PROXY_URL: ${{ secrets.STATICIP_PROXY_URL }}
         run: python3 dhan_trading_guard.py --pnl-exit-status
 
       - name: Remove today's P&L Exit
@@ -71,7 +74,20 @@ jobs:
         env:
           DHAN_CLIENT_ID: ${{ secrets.DHAN_CLIENT_ID }}
           DHAN_ACCESS_TOKEN: ${{ secrets.DHAN_ACCESS_TOKEN }}
+          STATICIP_PROXY_URL: ${{ secrets.STATICIP_PROXY_URL }}
         run: python3 dhan_trading_guard.py --remove-pnl-exit
+
+      - name: Check what IP the proxy actually presents
+        if: github.event.inputs.mode == 'check-proxy-ip'
+        env:
+          STATICIP_PROXY_URL: ${{ secrets.STATICIP_PROXY_URL }}
+        run: |
+          echo "Direct (no proxy) egress IP - what GitHub Actions itself uses:"
+          curl -s https://api64.ipify.org
+          echo ""
+          echo "Through the proxy - should show 178.94.250.19:"
+          curl -s -x "$STATICIP_PROXY_URL" https://api64.ipify.org
+          echo ""
 
       - name: Commit updated state file
         if: github.event_name == 'schedule' || github.event.inputs.mode == 'check' || github.event.inputs.mode == ''
