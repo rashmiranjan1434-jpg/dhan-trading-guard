@@ -115,7 +115,7 @@ def setup_pnl_exit(loss_value, profit_value=None, product_types=None, enable_kil
     client_id = os.environ.get("DHAN_CLIENT_ID")
     body = {
         "dhanClientId": client_id,
-        "lossValue": f"{loss_value:.2f}",
+        "lossValue": f"{-abs(loss_value):.2f}",
         "productType": product_types or ["INTRADAY"],
         "enableKillSwitch": enable_kill_switch,
     }
