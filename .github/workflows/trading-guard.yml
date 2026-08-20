@@ -4,7 +4,18 @@ on:
   schedule:
     - cron: "*/5 3-23 * * 1-5"
     - cron: "*/5 0-18 * * 2-6"
-  workflow_dispatch: {}
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "What to run"
+        required: true
+        default: "check"
+        type: choice
+        options:
+          - check
+          - setup-pnl-exit
+          - pnl-exit-status
+          - remove-pnl-exit
 
 jobs:
   check:
@@ -24,6 +35,7 @@ jobs:
         run: pip install dhanhq
 
       - name: Run guard check
+        if: github.event_name == 'schedule' || github.event.inputs.mode == 'check' || github.event.inputs.mode == ''
         env:
           DHAN_CLIENT_ID: ${{ secrets.DHAN_CLIENT_ID }}
           DHAN_ACCESS_TOKEN: ${{ secrets.DHAN_ACCESS_TOKEN }}
@@ -36,7 +48,33 @@ jobs:
             --state-file guard_state.json \
             ${{ vars.GUARD_DRY_RUN == 'false' && ' ' || '--dry-run' }}
 
+      - name: Set up today's P&L Exit with Dhan
+        if: github.event.inputs.mode == 'setup-pnl-exit'
+        env:
+          DHAN_CLIENT_ID: ${{ secrets.DHAN_CLIENT_ID }}
+          DHAN_ACCESS_TOKEN: ${{ secrets.DHAN_ACCESS_TOKEN }}
+        run: |
+          python3 dhan_trading_guard.py \
+            --setup-pnl-exit \
+            --capital ${{ vars.GUARD_CAPITAL || '45000' }} \
+            --loss-pct ${{ vars.GUARD_LOSS_PCT || '5' }}
+
+      - name: Check today's P&L Exit status
+        if: github.event.inputs.mode == 'pnl-exit-status'
+        env:
+          DHAN_CLIENT_ID: ${{ secrets.DHAN_CLIENT_ID }}
+          DHAN_ACCESS_TOKEN: ${{ secrets.DHAN_ACCESS_TOKEN }}
+        run: python3 dhan_trading_guard.py --pnl-exit-status
+
+      - name: Remove today's P&L Exit
+        if: github.event.inputs.mode == 'remove-pnl-exit'
+        env:
+          DHAN_CLIENT_ID: ${{ secrets.DHAN_CLIENT_ID }}
+          DHAN_ACCESS_TOKEN: ${{ secrets.DHAN_ACCESS_TOKEN }}
+        run: python3 dhan_trading_guard.py --remove-pnl-exit
+
       - name: Commit updated state file
+        if: github.event_name == 'schedule' || github.event.inputs.mode == 'check' || github.event.inputs.mode == ''
         run: |
           git config user.name "trading-guard-bot"
           git config user.email "actions@users.noreply.github.com"
