@@ -23,9 +23,7 @@ BEFORE YOU TRUST THIS WITH REAL MONEY:
   3. Know how to deactivate: python3 dhan_trading_guard.py --deactivate
      (or through the Dhan app itself, if they expose it there).
   4. This polls every POLL_SECONDS - it is NOT instantaneous. A fast-moving
-     loss between polls can still happen before this reacts. GitHub Actions'
-     own scheduler is also "best-effort" and can silently skip runs - use
-     --setup-pnl-exit every morning as the real, Dhan-side backstop.
+     loss between polls can still happen before this reacts.
 
 Setup:
   pip install dhanhq
@@ -85,6 +83,21 @@ def _pnl_exit_headers():
     }
 
 
+def _pnl_exit_proxies():
+    """Dhan requires these trading-control calls to come from a whitelisted
+    static IP - GitHub Actions runners don't have one, so this routes the
+    request through a static-IP proxy service instead. Set STATICIP_PROXY_URL
+    as a GitHub secret, formatted like:
+    https://username:password@host:port
+    If not set, the call goes out directly (fine for local testing from a
+    machine whose own IP is already whitelisted, but will fail with
+    DH-905 Invalid IP when run from GitHub Actions)."""
+    proxy_url = os.environ.get("STATICIP_PROXY_URL")
+    if not proxy_url:
+        return None
+    return {"https": proxy_url}
+
+
 def setup_pnl_exit(loss_value, profit_value=None, product_types=None, enable_kill_switch=True, debug=False):
     """Configures Dhan's native P&L Based Exit (Trader's Control) for TODAY.
     This runs entirely on Dhan's own servers - real-time, not dependent on
@@ -110,7 +123,7 @@ def setup_pnl_exit(loss_value, profit_value=None, product_types=None, enable_kil
         body["profitValue"] = f"{profit_value:.2f}"
     if debug:
         log(f"DEBUG pnlExit request body: {body}")
-    resp = requests.post(url, headers=_pnl_exit_headers(), json=body, timeout=15)
+    resp = requests.post(url, headers=_pnl_exit_headers(), json=body, proxies=_pnl_exit_proxies(), timeout=20)
     try:
         data = resp.json()
     except ValueError:
@@ -121,7 +134,7 @@ def setup_pnl_exit(loss_value, profit_value=None, product_types=None, enable_kil
 
 def get_pnl_exit_status(debug=False):
     url = "https://api.dhan.co/v2/pnlExit"
-    resp = requests.get(url, headers=_pnl_exit_headers(), timeout=15)
+    resp = requests.get(url, headers=_pnl_exit_headers(), proxies=_pnl_exit_proxies(), timeout=20)
     try:
         data = resp.json()
     except ValueError:
@@ -132,7 +145,7 @@ def get_pnl_exit_status(debug=False):
 
 def remove_pnl_exit(debug=False):
     url = "https://api.dhan.co/v2/pnlExit"
-    resp = requests.delete(url, headers=_pnl_exit_headers(), timeout=15)
+    resp = requests.delete(url, headers=_pnl_exit_headers(), proxies=_pnl_exit_proxies(), timeout=20)
     try:
         data = resp.json()
     except ValueError:
