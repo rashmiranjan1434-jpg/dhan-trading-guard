@@ -1,9 +1,10 @@
 name: Dhan Trading Guard
 
+# Triggered externally by cron-job.org every minute during market hours
+# (IST 9:00am-8:00pm) via the GitHub API - NOT by GitHub's own `schedule:`
+# trigger, which proved unreliable (silently skipped runs for 90+ minutes
+# on two separate mornings, Aug 20 and 21). Removed here on purpose.
 on:
-  schedule:
-    - cron: "*/5 3-23 * * 1-5"
-    - cron: "*/5 0-18 * * 2-6"
   workflow_dispatch:
     inputs:
       mode:
@@ -36,7 +37,7 @@ jobs:
         run: pip install dhanhq
 
       - name: Run guard check
-        if: github.event_name == 'schedule' || github.event.inputs.mode == 'check' || github.event.inputs.mode == ''
+        if: github.event.inputs.mode == 'check' || github.event.inputs.mode == ''
         env:
           DHAN_CLIENT_ID: ${{ secrets.DHAN_CLIENT_ID }}
           DHAN_ACCESS_TOKEN: ${{ secrets.DHAN_ACCESS_TOKEN }}
@@ -90,7 +91,7 @@ jobs:
           echo ""
 
       - name: Commit updated state file
-        if: github.event_name == 'schedule' || github.event.inputs.mode == 'check' || github.event.inputs.mode == ''
+        if: github.event.inputs.mode == 'check' || github.event.inputs.mode == ''
         run: |
           git config user.name "trading-guard-bot"
           git config user.email "actions@users.noreply.github.com"
