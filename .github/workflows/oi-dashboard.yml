@@ -1,0 +1,43 @@
+name: Nifty OI Dashboard
+
+# Triggered externally by cron-job.org (a second, separate cron job from
+# the trading guard's) every 5 minutes during market hours. No `schedule:`
+# trigger here either - same reason as trading-guard.yml: GitHub's own
+# scheduler proved unreliable.
+on:
+  workflow_dispatch: {}
+
+jobs:
+  fetch:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install dhanhq
+
+      - name: Fetch and analyze option chain
+        env:
+          DHAN_CLIENT_ID: ${{ secrets.DHAN_CLIENT_ID }}
+          DHAN_ACCESS_TOKEN: ${{ secrets.DHAN_ACCESS_TOKEN }}
+        run: |
+          python3 oi_dashboard.py \
+            --strikes-each-side 5 \
+            --state-file oi_state.json \
+            --output-file oi_data.json
+
+      - name: Commit updated data files
+        run: |
+          git config user.name "trading-guard-bot"
+          git config user.email "actions@users.noreply.github.com"
+          git add oi_data.json oi_state.json
+          git diff --quiet --cached || git commit -m "Update OI data [skip ci]"
+          git push
