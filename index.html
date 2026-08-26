@@ -1,0 +1,162 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Nifty OI Dashboard</title>
+<style>
+  :root {
+    --bg: #121310; --panel: #1A1B14; --panel2: #1F2117; --border: #2E2F24;
+    --text: #ECE7D8; --muted: #83866F; --amber: #D9A441;
+    --green: #8FBB93; --red: #E29891;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font-family: -apple-system, 'Segoe UI', Arial, sans-serif;
+    padding: 16px;
+  }
+  .mono { font-family: ui-monospace, 'SF Mono', Menlo, Consolas, monospace; }
+  .wrap { max-width: 720px; margin: 0 auto; }
+  .header { display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 4px; }
+  .title { font-size: 11px; text-transform: uppercase; letter-spacing: 0.14em; color: var(--muted); }
+  .ts { font-size: 11px; color: var(--muted); }
+  .spot { font-size: 30px; font-weight: 700; margin: 6px 0 16px; }
+  .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-bottom: 16px; }
+  .card { background: var(--panel); border-radius: 10px; padding: 12px 14px; border: 1px solid var(--border); }
+  .lbl { font-size: 10.5px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--muted); margin-bottom: 4px; }
+  .val { font-size: 18px; font-weight: 700; }
+  .sub { font-size: 12px; color: var(--muted); margin-top: 2px; }
+  .section-title { font-size: 12px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--muted); margin: 18px 0 8px; }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th { text-align: right; padding: 6px 8px; color: var(--muted); font-weight: 600; font-size: 11px; border-bottom: 1px solid var(--border); }
+  th:first-child, td:first-child { text-align: left; }
+  td { text-align: right; padding: 6px 8px; border-bottom: 1px solid var(--border); }
+  .atm-row { background: rgba(217,164,65,0.08); }
+  .buildup-long_buildup { color: var(--green); }
+  .buildup-short_buildup { color: var(--red); }
+  .buildup-short_covering { color: var(--green); }
+  .buildup-long_unwinding { color: var(--red); }
+  .buildup-no_prior_data { color: var(--muted); }
+  .mover-card { background: var(--panel2); border-radius: 8px; padding: 10px 12px; margin-bottom: 8px; font-size: 13px; }
+  .disclaimer { font-size: 11px; color: var(--muted); line-height: 1.6; margin-top: 20px; padding-top: 14px; border-top: 1px solid var(--border); }
+  .error { background: #241514; border: 1px solid #4A2320; color: #E29891; padding: 12px; border-radius: 8px; }
+</style>
+</head>
+<body>
+<div class="wrap" id="root">
+  <div class="header">
+    <div class="title">Nifty OI Dashboard</div>
+    <div class="ts mono" id="ts">loading...</div>
+  </div>
+  <div id="content">Loading data...</div>
+</div>
+
+<script>
+// Set this to your repo's raw JSON URL once oi_data.json exists.
+const DATA_URL = "https://raw.githubusercontent.com/rashmiranjan1434-jpg/dhan-trading-guard/main/oi_data.json";
+const REFRESH_MS = 60000;
+
+function fmtNum(n) {
+  if (n === null || n === undefined) return "-";
+  return Math.round(n).toLocaleString('en-IN');
+}
+function fmtPct(n) {
+  if (n === null || n === undefined) return "-";
+  const sign = n > 0 ? "+" : "";
+  return sign + n.toFixed(1) + "%";
+}
+function buildupLabel(b) {
+  const map = {
+    long_buildup: "Long Buildup", short_buildup: "Short Buildup",
+    short_covering: "Short Covering", long_unwinding: "Long Unwinding",
+    no_prior_data: "No prior data", flat: "Flat"
+  };
+  return map[b] || b;
+}
+
+async function load() {
+  try {
+    const res = await fetch(DATA_URL + "?t=" + Date.now());
+    if (!res.ok) throw new Error("HTTP " + res.status);
+    const d = await res.json();
+    render(d);
+  } catch (e) {
+    document.getElementById('content').innerHTML =
+      '<div class="error">Could not load data: ' + e.message + '<br>Check that oi_data.json exists in the repo and DATA_URL above is correct.</div>';
+  }
+}
+
+function render(d) {
+  document.getElementById('ts').textContent = new Date(d.timestamp).toLocaleTimeString('en-IN');
+
+  const moversHtml = (movers, label) => movers.map(m =>
+    `<div class="mover-card">
+      <b>${label} ${m.strike}</b> &nbsp; ${fmtPct(m.oi_chg_pct)} OI change
+      &nbsp; <span class="buildup-${m.buildup}">${buildupLabel(m.buildup)}</span>
+    </div>`
+  ).join('') || '<div class="sub">No change data yet (first snapshot of the day).</div>';
+
+  const rowsHtml = d.strikes.map(s => `
+    <tr class="${s.strike === d.atm_strike ? 'atm-row' : ''}">
+      <td class="mono">${fmtNum(s.strike)}${s.strike === d.atm_strike ? ' (ATM)' : ''}</td>
+      <td class="mono">${fmtNum(s.ce_oi)}</td>
+      <td class="mono ${s.ce_buildup.includes('long') ? 'buildup-long_buildup' : s.ce_buildup.includes('short') ? 'buildup-short_buildup' : ''}">${fmtPct(s.ce_oi_chg_pct)}</td>
+      <td class="mono">${s.ce_iv.toFixed(1)}</td>
+      <td class="mono">${s.pe_iv.toFixed(1)}</td>
+      <td class="mono ${s.pe_buildup.includes('long') ? 'buildup-long_buildup' : s.pe_buildup.includes('short') ? 'buildup-short_buildup' : ''}">${fmtPct(s.pe_oi_chg_pct)}</td>
+      <td class="mono">${fmtNum(s.pe_oi)}</td>
+    </tr>
+  `).join('');
+
+  document.getElementById('content').innerHTML = `
+    <div class="spot mono">${d.spot.toLocaleString('en-IN')}</div>
+
+    <div class="grid">
+      <div class="card">
+        <div class="lbl">PCR</div>
+        <div class="val mono">${d.pcr ?? '-'}</div>
+        <div class="sub">${d.pcr_read}</div>
+      </div>
+      <div class="card">
+        <div class="lbl">ATM IV (CE / PE)</div>
+        <div class="val mono">${d.atm_ce_iv.toFixed(1)} / ${d.atm_pe_iv.toFixed(1)}</div>
+        <div class="sub">ATM strike ${fmtNum(d.atm_strike)}</div>
+      </div>
+      <div class="card">
+        <div class="lbl">Resistance (highest CE OI)</div>
+        <div class="val mono">${fmtNum(d.resistance_strike)}</div>
+      </div>
+      <div class="card">
+        <div class="lbl">Support (highest PE OI)</div>
+        <div class="val mono">${fmtNum(d.support_strike)}</div>
+      </div>
+    </div>
+
+    <div class="section-title">Fresh OI - Call side</div>
+    ${moversHtml(d.top_ce_movers, 'CE')}
+
+    <div class="section-title">Fresh OI - Put side</div>
+    ${moversHtml(d.top_pe_movers, 'PE')}
+
+    <div class="section-title">Chain (${d.strikes.length} strikes, expiry ${d.expiry})</div>
+    <table>
+      <thead>
+        <tr><th>Strike</th><th>CE OI</th><th>CE Chg</th><th>CE IV</th><th>PE IV</th><th>PE Chg</th><th>PE OI</th></tr>
+      </thead>
+      <tbody>${rowsHtml}</tbody>
+    </table>
+
+    <div class="disclaimer">
+      This shows market structure only (OI, PCR, IV) - it does not generate buy/sell signals.
+      Data refreshes automatically every ${REFRESH_MS/1000}s. "Buildup" needs two snapshots to compute,
+      so the first read of the day will show "No prior data."
+    </div>
+  `;
+}
+
+load();
+setInterval(load, REFRESH_MS);
+</script>
+</body>
+</html>
