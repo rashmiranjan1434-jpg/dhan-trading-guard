@@ -43,6 +43,7 @@ import os
 import sys
 import json
 import argparse
+import requests
 from datetime import datetime
 
 try:
@@ -58,6 +59,28 @@ NIFTY_SEGMENT = "IDX_I"
 def log(msg):
     ts = datetime.now().strftime("%H:%M:%S")
     print(f"[{ts}] {msg}", flush=True)
+
+
+def raw_debug_call(debug=False):
+    """Bypasses the dhanhq SDK entirely and calls the expiry_list endpoint
+    directly with requests, so we can see the REAL HTTP status code and raw
+    response body - the SDK's wrapper can mask what actually came back."""
+    client_id = os.environ.get("DHAN_CLIENT_ID")
+    access_token = os.environ.get("DHAN_ACCESS_TOKEN")
+    proxy_url = os.environ.get("STATICIP_PROXY_URL")
+    proxies = {"https": proxy_url, "http": proxy_url} if proxy_url else None
+    url = "https://api.dhan.co/v2/optionchain/expirylist"
+    headers = {
+        "access-token": access_token,
+        "client-id": client_id,
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+    }
+    body = {"UnderlyingScrip": int(NIFTY_SECURITY_ID), "UnderlyingSeg": NIFTY_SEGMENT}
+    resp = requests.post(url, headers=headers, json=body, proxies=proxies, timeout=20)
+    log(f"RAW HTTP status: {resp.status_code}")
+    log(f"RAW response headers: {dict(resp.headers)}")
+    log(f"RAW response body (first 2000 chars): {resp.text[:2000]}")
 
 
 def get_client():
@@ -141,6 +164,45 @@ def _pct_change(prev, curr):
     return round((curr - prev) / prev * 100, 1)
 
 
+def _build_narrative(spot, atm_strike, atm_row, pcr, pcr_read, support_strike,
+                      resistance_strike, ce_movers, pe_movers):
+    """Builds a plain-English summary from the computed numbers - templated,
+    not a live AI call, since this runs unattended on a schedule. Mirrors
+    the read-out style requested: a spot line, then a few bullet reads."""
+    bullets = []
+
+    bullets.append(
+        f"ATM zone ({int(atm_strike)}): IV is {atm_row['ce_iv']:.1f}%-{atm_row['pe_iv']:.1f}% "
+        f"on the call/put side."
+    )
+
+    bullets.append(f"PCR is {pcr} - {pcr_read}." if pcr is not None else "PCR unavailable this snapshot.")
+
+    if support_strike is not None and resistance_strike is not None:
+        bullets.append(
+            f"OI structure: heaviest put OI sits at {int(support_strike)} (likely support), "
+            f"heaviest call OI sits at {int(resistance_strike)} (likely resistance)."
+        )
+
+    for m in ce_movers:
+        if m["ce_oi_chg_pct"] is not None:
+            bullets.append(
+                f"{int(m['strike'])} CE shows the biggest fresh OI move on the call side "
+                f"({m['ce_oi_chg_pct']:+.0f}% change) - {m['ce_buildup'].replace('_', ' ')}."
+            )
+    for m in pe_movers:
+        if m["pe_oi_chg_pct"] is not None:
+            bullets.append(
+                f"{int(m['strike'])} PE shows the biggest fresh OI move on the put side "
+                f"({m['pe_oi_chg_pct']:+.0f}% change) - {m['pe_buildup'].replace('_', ' ')}."
+            )
+
+    return {
+        "headline": f"NIFTY 50 is at {spot:,.2f}, ATM strike {int(atm_strike)}.",
+        "bullets": bullets,
+    }
+
+
 def analyze(dhan, strikes_each_side, state_file, debug=False):
     expiry = get_nearest_expiry(dhan, debug)
     chain_resp = fetch_chain(dhan, expiry, debug)
@@ -203,6 +265,9 @@ def analyze(dhan, strikes_each_side, state_file, debug=False):
     else:
         pcr_read = "roughly neutral"
 
+    narrative = _build_narrative(spot, atm_strike, atm_row, pcr, pcr_read,
+                                  support_strike, resistance_strike, ce_movers, pe_movers)
+
     result = {
         "timestamp": datetime.now().isoformat(timespec="seconds"),
         "expiry": expiry,
@@ -217,6 +282,7 @@ def analyze(dhan, strikes_each_side, state_file, debug=False):
         "top_ce_movers": [{"strike": s["strike"], "oi_chg_pct": s["ce_oi_chg_pct"], "buildup": s["ce_buildup"]} for s in ce_movers],
         "top_pe_movers": [{"strike": s["strike"], "oi_chg_pct": s["pe_oi_chg_pct"], "buildup": s["pe_buildup"]} for s in pe_movers],
         "strikes": strikes_out,
+        "narrative": narrative,
     }
 
     # persist this snapshot (bare rows only) for next run's comparison
@@ -235,7 +301,13 @@ def main():
     parser.add_argument("--output-file", type=str, default="oi_data.json",
                          help="Where the full result is written - this is what the dashboard page reads.")
     parser.add_argument("--debug", action="store_true")
+    parser.add_argument("--raw-debug", action="store_true",
+                         help="Bypass the SDK, call the endpoint directly, show real HTTP status and body.")
     args = parser.parse_args()
+
+    if args.raw_debug:
+        raw_debug_call(args.debug)
+        return
 
     dhan = get_client()
     try:
