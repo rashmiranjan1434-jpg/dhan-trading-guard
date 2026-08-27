@@ -28,11 +28,13 @@ jobs:
         env:
           DHAN_CLIENT_ID: ${{ secrets.DHAN_CLIENT_ID }}
           DHAN_ACCESS_TOKEN: ${{ secrets.DHAN_ACCESS_TOKEN }}
+          STATICIP_PROXY_URL: ${{ secrets.STATICIP_PROXY_URL }}
         run: |
           python3 oi_dashboard.py \
             --strikes-each-side 5 \
             --state-file oi_state.json \
-            --output-file oi_data.json
+            --output-file oi_data.json \
+            --debug
 
       - name: Commit updated data files
         run: |
