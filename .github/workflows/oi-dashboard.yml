@@ -5,7 +5,16 @@ name: Nifty OI Dashboard
 # trigger here either - same reason as trading-guard.yml: GitHub's own
 # scheduler proved unreliable.
 on:
-  workflow_dispatch: {}
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "What to run"
+        required: true
+        default: "fetch"
+        type: choice
+        options:
+          - fetch
+          - raw-debug
 
 jobs:
   fetch:
@@ -25,6 +34,7 @@ jobs:
         run: pip install dhanhq
 
       - name: Fetch and analyze option chain
+        if: github.event.inputs.mode == 'fetch' || github.event.inputs.mode == ''
         env:
           DHAN_CLIENT_ID: ${{ secrets.DHAN_CLIENT_ID }}
           DHAN_ACCESS_TOKEN: ${{ secrets.DHAN_ACCESS_TOKEN }}
@@ -36,7 +46,16 @@ jobs:
             --output-file oi_data.json \
             --debug
 
+      - name: Raw debug call (bypass SDK)
+        if: github.event.inputs.mode == 'raw-debug'
+        env:
+          DHAN_CLIENT_ID: ${{ secrets.DHAN_CLIENT_ID }}
+          DHAN_ACCESS_TOKEN: ${{ secrets.DHAN_ACCESS_TOKEN }}
+          STATICIP_PROXY_URL: ${{ secrets.STATICIP_PROXY_URL }}
+        run: python3 oi_dashboard.py --raw-debug --debug
+
       - name: Commit updated data files
+        if: github.event.inputs.mode == 'fetch' || github.event.inputs.mode == ''
         run: |
           git config user.name "trading-guard-bot"
           git config user.email "actions@users.noreply.github.com"
