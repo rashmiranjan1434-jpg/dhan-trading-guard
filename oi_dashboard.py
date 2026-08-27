@@ -97,21 +97,51 @@ def get_client():
     return dhan
 
 
+def _raw_headers():
+    return {
+        "access-token": os.environ.get("DHAN_ACCESS_TOKEN"),
+        "client-id": os.environ.get("DHAN_CLIENT_ID"),
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+    }
+
+
+def _raw_proxies():
+    proxy_url = os.environ.get("STATICIP_PROXY_URL")
+    return {"https": proxy_url, "http": proxy_url} if proxy_url else None
+
+
 def get_nearest_expiry(dhan, debug=False):
-    resp = dhan.expiry_list(NIFTY_SECURITY_ID, NIFTY_SEGMENT)
+    """Calls the endpoint directly with requests instead of going through
+    the dhanhq SDK's expiry_list() - the SDK was found to mangle this
+    endpoint's perfectly valid {"data": [...], "status": "success"} response
+    into a generic failure shape. Confirmed via --raw-debug against the
+    real account: raw HTTP call returns 200 with correct data every time;
+    the SDK wrapper around the same call does not. Reported upstream as a
+    real dhanhq library bug, not something fixable in our own code."""
+    url = "https://api.dhan.co/v2/optionchain/expirylist"
+    body = {"UnderlyingScrip": int(NIFTY_SECURITY_ID), "UnderlyingSeg": NIFTY_SEGMENT}
+    resp = requests.post(url, headers=_raw_headers(), json=body, proxies=_raw_proxies(), timeout=20)
+    data = resp.json()
     if debug:
-        log(f"DEBUG expiry_list raw response: {resp}")
-    expiries = resp.get("data", []) if isinstance(resp, dict) else []
+        log(f"DEBUG expiry_list raw response: {data}")
+    expiries = data.get("data", []) if isinstance(data, dict) else []
     if not expiries:
-        raise RuntimeError(f"No expiries returned: {resp}")
+        raise RuntimeError(f"No expiries returned: {data}")
     return sorted(expiries)[0]
 
 
 def fetch_chain(dhan, expiry, debug=False):
-    resp = dhan.option_chain(NIFTY_SECURITY_ID, NIFTY_SEGMENT, expiry)
+    """Same reasoning as get_nearest_expiry - calls /v2/optionchain
+    directly rather than through the SDK's option_chain(), which showed
+    the same response-mangling issue in testing."""
+    url = "https://api.dhan.co/v2/optionchain"
+    body = {"UnderlyingScrip": int(NIFTY_SECURITY_ID), "UnderlyingSeg": NIFTY_SEGMENT, "Expiry": expiry}
+    resp = requests.post(url, headers=_raw_headers(), json=body, proxies=_raw_proxies(), timeout=20)
+    data = resp.json()
     if debug:
-        log(f"DEBUG option_chain raw response (truncated): {str(resp)[:1500]}")
-    return resp
+        log(f"DEBUG option_chain raw response (truncated): {str(data)[:1500]}")
+    return data
 
 
 def _extract_strike_rows(chain_resp):
@@ -185,13 +215,13 @@ def _build_narrative(spot, atm_strike, atm_row, pcr, pcr_read, support_strike,
         )
 
     for m in ce_movers:
-        if m["ce_oi_chg_pct"] is not None:
+        if m["ce_oi_chg_pct"] is not None and abs(m["ce_oi_chg_pct"]) >= 5:
             bullets.append(
                 f"{int(m['strike'])} CE shows the biggest fresh OI move on the call side "
                 f"({m['ce_oi_chg_pct']:+.0f}% change) - {m['ce_buildup'].replace('_', ' ')}."
             )
     for m in pe_movers:
-        if m["pe_oi_chg_pct"] is not None:
+        if m["pe_oi_chg_pct"] is not None and abs(m["pe_oi_chg_pct"]) >= 5:
             bullets.append(
                 f"{int(m['strike'])} PE shows the biggest fresh OI move on the put side "
                 f"({m['pe_oi_chg_pct']:+.0f}% change) - {m['pe_buildup'].replace('_', ' ')}."
