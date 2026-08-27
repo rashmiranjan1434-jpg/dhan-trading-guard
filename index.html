@@ -7,44 +7,57 @@
 <style>
   :root {
     --bg: #121310; --panel: #1A1B14; --panel2: #1F2117; --border: #2E2F24;
-    --text: #ECE7D8; --muted: #83866F; --amber: #D9A441;
+    --text: #ECE7D8; --muted: #83866F; --amber: #D9A441; --amber-dim: #8A6E2E;
     --green: #8FBB93; --red: #E29891;
   }
   * { box-sizing: border-box; }
   body {
     margin: 0; background: var(--bg); color: var(--text);
     font-family: -apple-system, 'Segoe UI', Arial, sans-serif;
-    padding: 16px;
+    padding: 18px 16px 40px;
   }
   .mono { font-family: ui-monospace, 'SF Mono', Menlo, Consolas, monospace; }
   .wrap { max-width: 720px; margin: 0 auto; }
-  .header { display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 4px; }
-  .title { font-size: 11px; text-transform: uppercase; letter-spacing: 0.14em; color: var(--muted); }
+  .header { display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 16px; }
+  .title { font-size: 11px; text-transform: uppercase; letter-spacing: 0.16em; color: var(--muted); }
   .ts { font-size: 11px; color: var(--muted); }
-  .spot { font-size: 30px; font-weight: 700; margin: 6px 0 16px; }
-  .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-bottom: 16px; }
+
+  .briefing {
+    background: linear-gradient(180deg, #1D1E15, #171812);
+    border: 1px solid var(--border);
+    border-left: 3px solid var(--amber);
+    border-radius: 4px;
+    padding: 20px 22px;
+    margin-bottom: 20px;
+  }
+  .briefing-eyebrow { font-size: 10.5px; text-transform: uppercase; letter-spacing: 0.12em; color: var(--amber-dim); margin-bottom: 8px; }
+  .briefing-headline { font-size: 22px; font-weight: 700; margin-bottom: 14px; }
+  .briefing ul { margin: 0; padding-left: 0; list-style: none; }
+  .briefing li { font-size: 14.5px; line-height: 1.65; margin-bottom: 8px; padding-left: 16px; position: relative; color: #D9D5C4; }
+  .briefing li::before { content: "—"; position: absolute; left: 0; color: var(--amber-dim); }
+
+  .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-bottom: 20px; }
   .card { background: var(--panel); border-radius: 10px; padding: 12px 14px; border: 1px solid var(--border); }
   .lbl { font-size: 10.5px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--muted); margin-bottom: 4px; }
   .val { font-size: 18px; font-weight: 700; }
   .sub { font-size: 12px; color: var(--muted); margin-top: 2px; }
-  .section-title { font-size: 12px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--muted); margin: 18px 0 8px; }
-  table { width: 100%; border-collapse: collapse; font-size: 13px; }
-  th { text-align: right; padding: 6px 8px; color: var(--muted); font-weight: 600; font-size: 11px; border-bottom: 1px solid var(--border); }
+
+  .section-title { font-size: 11px; text-transform: uppercase; letter-spacing: 0.1em; color: var(--muted); margin: 22px 0 10px; padding-top: 16px; border-top: 1px solid var(--border); }
+  table { width: 100%; border-collapse: collapse; font-size: 12.5px; }
+  th { text-align: right; padding: 7px 8px; color: var(--muted); font-weight: 600; font-size: 10.5px; border-bottom: 1px solid var(--border); }
   th:first-child, td:first-child { text-align: left; }
-  td { text-align: right; padding: 6px 8px; border-bottom: 1px solid var(--border); }
+  td { text-align: right; padding: 7px 8px; border-bottom: 1px solid var(--border); }
   .atm-row { background: rgba(217,164,65,0.08); }
-  .buildup-long_buildup { color: var(--green); }
-  .buildup-short_buildup { color: var(--red); }
-  .buildup-short_covering { color: var(--green); }
-  .buildup-long_unwinding { color: var(--red); }
-  .buildup-no_prior_data { color: var(--muted); }
-  .mover-card { background: var(--panel2); border-radius: 8px; padding: 10px 12px; margin-bottom: 8px; font-size: 13px; }
-  .disclaimer { font-size: 11px; color: var(--muted); line-height: 1.6; margin-top: 20px; padding-top: 14px; border-top: 1px solid var(--border); }
+  .up { color: var(--green); } .down { color: var(--red); }
+
+  .mover-card { background: var(--panel2); border-radius: 8px; padding: 10px 12px; margin-bottom: 8px; font-size: 13px; display: flex; justify-content: space-between; align-items: center; }
+  .mover-strike { font-weight: 700; }
+  .disclaimer { font-size: 11px; color: var(--muted); line-height: 1.6; margin-top: 24px; padding-top: 14px; border-top: 1px solid var(--border); }
   .error { background: #241514; border: 1px solid #4A2320; color: #E29891; padding: 12px; border-radius: 8px; }
 </style>
 </head>
 <body>
-<div class="wrap" id="root">
+<div class="wrap">
   <div class="header">
     <div class="title">Nifty OI Dashboard</div>
     <div class="ts mono" id="ts">loading...</div>
@@ -53,7 +66,6 @@
 </div>
 
 <script>
-// Set this to your repo's raw JSON URL once oi_data.json exists.
 const DATA_URL = "https://raw.githubusercontent.com/rashmiranjan1434-jpg/dhan-trading-guard/main/oi_data.json";
 const REFRESH_MS = 60000;
 
@@ -74,6 +86,10 @@ function buildupLabel(b) {
   };
   return map[b] || b;
 }
+function pctClass(n) {
+  if (n === null || n === undefined) return "";
+  return n > 0 ? "up" : (n < 0 ? "down" : "");
+}
 
 async function load() {
   try {
@@ -83,34 +99,43 @@ async function load() {
     render(d);
   } catch (e) {
     document.getElementById('content').innerHTML =
-      '<div class="error">Could not load data: ' + e.message + '<br>Check that oi_data.json exists in the repo and DATA_URL above is correct.</div>';
+      '<div class="error">Could not load data: ' + e.message + '<br>Check that oi_data.json exists in the repo.</div>';
   }
 }
 
 function render(d) {
   document.getElementById('ts').textContent = new Date(d.timestamp).toLocaleTimeString('en-IN');
 
-  const moversHtml = (movers, label) => movers.map(m =>
-    `<div class="mover-card">
-      <b>${label} ${m.strike}</b> &nbsp; ${fmtPct(m.oi_chg_pct)} OI change
-      &nbsp; <span class="buildup-${m.buildup}">${buildupLabel(m.buildup)}</span>
-    </div>`
-  ).join('') || '<div class="sub">No change data yet (first snapshot of the day).</div>';
+  const bulletsHtml = (d.narrative && d.narrative.bullets ? d.narrative.bullets : []).map(b => '<li>' + b + '</li>').join('');
+
+  const moverRow = (m, label) => `
+    <div class="mover-card">
+      <span><span class="mover-strike">${label} ${fmtNum(m.strike)}</span> &nbsp; <span class="${pctClass(m.oi_chg_pct)} mono">${fmtPct(m.oi_chg_pct)}</span></span>
+      <span class="sub">${buildupLabel(m.buildup)}</span>
+    </div>`;
+  const ceMoversHtml = d.top_ce_movers.map(m => moverRow(m, 'CE')).join('') || '<div class="sub">No change data yet.</div>';
+  const peMoversHtml = d.top_pe_movers.map(m => moverRow(m, 'PE')).join('') || '<div class="sub">No change data yet.</div>';
 
   const rowsHtml = d.strikes.map(s => `
     <tr class="${s.strike === d.atm_strike ? 'atm-row' : ''}">
-      <td class="mono">${fmtNum(s.strike)}${s.strike === d.atm_strike ? ' (ATM)' : ''}</td>
+      <td class="mono">${fmtNum(s.strike)}${s.strike === d.atm_strike ? ' •' : ''}</td>
       <td class="mono">${fmtNum(s.ce_oi)}</td>
-      <td class="mono ${s.ce_buildup.includes('long') ? 'buildup-long_buildup' : s.ce_buildup.includes('short') ? 'buildup-short_buildup' : ''}">${fmtPct(s.ce_oi_chg_pct)}</td>
+      <td class="mono ${pctClass(s.ce_oi_chg_pct)}">${fmtPct(s.ce_oi_chg_pct)}</td>
       <td class="mono">${s.ce_iv.toFixed(1)}</td>
       <td class="mono">${s.pe_iv.toFixed(1)}</td>
-      <td class="mono ${s.pe_buildup.includes('long') ? 'buildup-long_buildup' : s.pe_buildup.includes('short') ? 'buildup-short_buildup' : ''}">${fmtPct(s.pe_oi_chg_pct)}</td>
+      <td class="mono ${pctClass(s.pe_oi_chg_pct)}">${fmtPct(s.pe_oi_chg_pct)}</td>
       <td class="mono">${fmtNum(s.pe_oi)}</td>
     </tr>
   `).join('');
 
+  const headline = (d.narrative && d.narrative.headline) ? d.narrative.headline : d.spot.toLocaleString('en-IN');
+
   document.getElementById('content').innerHTML = `
-    <div class="spot mono">${d.spot.toLocaleString('en-IN')}</div>
+    <div class="briefing">
+      <div class="briefing-eyebrow">Snapshot read</div>
+      <div class="briefing-headline mono">${headline}</div>
+      <ul>${bulletsHtml}</ul>
+    </div>
 
     <div class="grid">
       <div class="card">
@@ -121,23 +146,25 @@ function render(d) {
       <div class="card">
         <div class="lbl">ATM IV (CE / PE)</div>
         <div class="val mono">${d.atm_ce_iv.toFixed(1)} / ${d.atm_pe_iv.toFixed(1)}</div>
-        <div class="sub">ATM strike ${fmtNum(d.atm_strike)}</div>
+        <div class="sub">Strike ${fmtNum(d.atm_strike)}</div>
       </div>
       <div class="card">
-        <div class="lbl">Resistance (highest CE OI)</div>
+        <div class="lbl">Resistance</div>
         <div class="val mono">${fmtNum(d.resistance_strike)}</div>
+        <div class="sub">Highest call OI</div>
       </div>
       <div class="card">
-        <div class="lbl">Support (highest PE OI)</div>
+        <div class="lbl">Support</div>
         <div class="val mono">${fmtNum(d.support_strike)}</div>
+        <div class="sub">Highest put OI</div>
       </div>
     </div>
 
-    <div class="section-title">Fresh OI - Call side</div>
-    ${moversHtml(d.top_ce_movers, 'CE')}
+    <div class="section-title">Fresh OI — Call side</div>
+    ${ceMoversHtml}
 
-    <div class="section-title">Fresh OI - Put side</div>
-    ${moversHtml(d.top_pe_movers, 'PE')}
+    <div class="section-title">Fresh OI — Put side</div>
+    ${peMoversHtml}
 
     <div class="section-title">Chain (${d.strikes.length} strikes, expiry ${d.expiry})</div>
     <table>
@@ -148,9 +175,8 @@ function render(d) {
     </table>
 
     <div class="disclaimer">
-      This shows market structure only (OI, PCR, IV) - it does not generate buy/sell signals.
-      Data refreshes automatically every ${REFRESH_MS/1000}s. "Buildup" needs two snapshots to compute,
-      so the first read of the day will show "No prior data."
+      This shows market structure only — it does not generate buy or sell signals. Refreshes every ${REFRESH_MS/1000}s.
+      "Buildup" needs two snapshots to compute, so the first read of the day shows "No prior data."
     </div>
   `;
 }
