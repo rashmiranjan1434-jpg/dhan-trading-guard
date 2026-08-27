@@ -233,7 +233,31 @@ def _build_narrative(spot, atm_strike, atm_row, pcr, pcr_read, support_strike,
     }
 
 
-def analyze(dhan, strikes_each_side, state_file, debug=False):
+def _today_str():
+    return datetime.now().strftime("%Y-%m-%d")
+
+
+def _load_history(history_file):
+    if not history_file or not os.path.exists(history_file):
+        return []
+    try:
+        with open(history_file, "r") as f:
+            data = json.load(f)
+    except (json.JSONDecodeError, OSError):
+        return []
+    if data.get("date") != _today_str():
+        return []  # new trading day - start the log fresh
+    return data.get("snapshots", [])
+
+
+def _save_history(history_file, snapshots):
+    if not history_file:
+        return
+    with open(history_file, "w") as f:
+        json.dump({"date": _today_str(), "snapshots": snapshots}, f)
+
+
+def analyze(dhan, strikes_each_side, state_file, debug=False, history_file=None):
     expiry = get_nearest_expiry(dhan, debug)
     chain_resp = fetch_chain(dhan, expiry, debug)
     spot, rows = _extract_strike_rows(chain_resp)
@@ -320,6 +344,22 @@ def analyze(dhan, strikes_each_side, state_file, debug=False):
         with open(state_file, "w") as f:
             json.dump({"timestamp": result["timestamp"], "rows": window}, f)
 
+    # append to the day's running history log - only the compact fields
+    # needed for a per-strike time series (not the full chain each time,
+    # to keep the log a reasonable size across ~75 snapshots/trading day)
+    if history_file:
+        history = _load_history(history_file)
+        history.append({
+            "time": datetime.now().strftime("%H:%M"),
+            "spot": spot,
+            "atm_strike": atm_strike,
+            "support_strike": support_strike,
+            "resistance_strike": resistance_strike,
+            "strikes": [{"strike": r["strike"], "ce_oi": r["ce_oi"], "pe_oi": r["pe_oi"]} for r in window],
+        })
+        _save_history(history_file, history)
+        result["history"] = history
+
     return result
 
 
@@ -328,6 +368,8 @@ def main():
     parser.add_argument("--strikes-each-side", type=int, default=5)
     parser.add_argument("--state-file", type=str, default="oi_state.json",
                          help="Stores the previous snapshot for change/buildup calc - separate from the output file.")
+    parser.add_argument("--history-file", type=str, default="oi_history.json",
+                         help="Stores every snapshot for the current trading day, for the intraday time-series view. Resets automatically at the start of each new day.")
     parser.add_argument("--output-file", type=str, default="oi_data.json",
                          help="Where the full result is written - this is what the dashboard page reads.")
     parser.add_argument("--debug", action="store_true")
@@ -341,7 +383,7 @@ def main():
 
     dhan = get_client()
     try:
-        result = analyze(dhan, args.strikes_each_side, args.state_file, args.debug)
+        result = analyze(dhan, args.strikes_each_side, args.state_file, args.debug, args.history_file)
     except Exception as e:
         log(f"ERROR: {e}")
         sys.exit(1)
