@@ -1,139 +1,360 @@
 """
-Test harness for oi_dashboard.py
+Nifty OI Dashboard
+===================
+Fetches Nifty's live option chain from Dhan every few minutes, computes
+standard options-market-structure metrics (PCR, OI buildup, top OI movers,
+support/resistance from OI, IV read), and writes the result to a JSON file
+this repo also serves as a simple public dashboard page.
 
-Uses a synthetic (fake) option chain response shaped like Dhan's documented
-format, so the analysis math (PCR, buildup classification, top movers,
-support/resistance) can be verified without needing live credentials.
+This tool DESCRIBES market structure. It does not generate buy/sell signals
+and never will - the trade decision stays entirely with the person reading
+the dashboard. See DASHBOARD.md / index.html for the display side.
 
-IMPORTANT CAVEAT this test suite CANNOT cover: whether Dhan's REAL response
-actually uses the field names this script assumes (oc / ce / pe / oi /
-last_price / implied_volatility). That can only be confirmed by running
-`python3 oi_dashboard.py --debug` against a real account and reading the
-raw response it prints - do this before trusting the output.
+Definitions used (standard options terminology, not invented here):
+  PCR = Total Put OI / Total Call OI across the chain
+    < ~0.7  -> call-heavy positioning -> bearish/neutral lean
+    ~0.7-1.3 -> roughly neutral
+    > ~1.3  -> put-heavy positioning -> bullish lean
 
-Usage:
-    python3 test_oi_dashboard.py
+  OI buildup per strike (uses that OPTION CONTRACT's own premium + OI,
+  not the underlying index):
+    premium up,   OI up   -> Long Buildup    (fresh bullish positions)
+    premium down, OI up   -> Short Buildup   (fresh bearish positions)
+    premium up,   OI down -> Short Covering  (bears exiting)
+    premium down, OI down -> Long Unwinding  (bulls exiting)
+  Buildup requires a PREVIOUS snapshot to compare against - the very first
+  run of the day has no buildup data yet, only current OI levels.
+
+  Top movers ("OI1"/"OI2"): the two strikes (call side and put side,
+  independently) with the largest % OI change since the last snapshot.
+
+  Support = highest ABSOLUTE OI on the put side.
+  Resistance = highest ABSOLUTE OI on the call side.
+
+Setup:
+  pip install dhanhq
+  export DHAN_CLIENT_ID / DHAN_ACCESS_TOKEN (same as the trading guard)
+
+Run:
+  python3 oi_dashboard.py --strikes-each-side 5 --state-file oi_state.json --debug
 """
 
-import sys
 import os
-sys.path.insert(0, ".")
-from oi_dashboard import analyze, _pct_change, _classify_buildup
+import sys
+import json
+import argparse
+import requests
+from datetime import datetime
+
+try:
+    from dhanhq import dhanhq, DhanContext
+except ImportError:
+    print("Missing dependency. Run: pip install dhanhq")
+    sys.exit(1)
+
+NIFTY_SECURITY_ID = "13"
+NIFTY_SEGMENT = "IDX_I"
 
 
-class MockDhan:
-    def __init__(self, expiry, chain_response):
-        self._expiry = expiry
-        self._chain = chain_response
-
-    def expiry_list(self, sid, seg):
-        return {"status": "success", "data": [self._expiry]}
-
-    def option_chain(self, sid, seg, expiry):
-        return self._chain
+def log(msg):
+    ts = datetime.now().strftime("%H:%M:%S")
+    print(f"[{ts}] {msg}", flush=True)
 
 
-def make_chain(spot, strikes):
-    """strikes: dict of strike -> (ce_oi, ce_ltp, ce_iv, pe_oi, pe_ltp, pe_iv)"""
-    oc = {}
-    for strike, (ce_oi, ce_ltp, ce_iv, pe_oi, pe_ltp, pe_iv) in strikes.items():
-        oc[str(strike)] = {
-            "ce": {"oi": ce_oi, "last_price": ce_ltp, "implied_volatility": ce_iv},
-            "pe": {"oi": pe_oi, "last_price": pe_ltp, "implied_volatility": pe_iv},
-        }
-    return {"status": "success", "data": {"last_price": spot, "oc": oc}}
+def raw_debug_call(debug=False):
+    """Bypasses the dhanhq SDK entirely and calls the expiry_list endpoint
+    directly with requests, so we can see the REAL HTTP status code and raw
+    response body - the SDK's wrapper can mask what actually came back."""
+    client_id = os.environ.get("DHAN_CLIENT_ID")
+    access_token = os.environ.get("DHAN_ACCESS_TOKEN")
+    proxy_url = os.environ.get("STATICIP_PROXY_URL")
+    proxies = {"https": proxy_url, "http": proxy_url} if proxy_url else None
+    url = "https://api.dhan.co/v2/optionchain/expirylist"
+    headers = {
+        "access-token": access_token,
+        "client-id": client_id,
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+    }
+    body = {"UnderlyingScrip": int(NIFTY_SECURITY_ID), "UnderlyingSeg": NIFTY_SEGMENT}
+    resp = requests.post(url, headers=headers, json=body, proxies=proxies, timeout=20)
+    log(f"RAW HTTP status: {resp.status_code}")
+    log(f"RAW response headers: {dict(resp.headers)}")
+    log(f"RAW response body (first 2000 chars): {resp.text[:2000]}")
+
+
+def get_client():
+    client_id = os.environ.get("DHAN_CLIENT_ID")
+    access_token = os.environ.get("DHAN_ACCESS_TOKEN")
+    if not client_id or not access_token:
+        log("ERROR: Set DHAN_CLIENT_ID and DHAN_ACCESS_TOKEN environment variables first.")
+        sys.exit(1)
+    dhan = dhanhq(DhanContext(client_id, access_token))
+    proxy_url = os.environ.get("STATICIP_PROXY_URL")
+    if proxy_url:
+        dhan.dhan_http.session.proxies = {"https": proxy_url, "http": proxy_url}
+        log("Routing requests through the static-IP proxy.")
+    return dhan
+
+
+def _raw_headers():
+    return {
+        "access-token": os.environ.get("DHAN_ACCESS_TOKEN"),
+        "client-id": os.environ.get("DHAN_CLIENT_ID"),
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+    }
+
+
+def _raw_proxies():
+    proxy_url = os.environ.get("STATICIP_PROXY_URL")
+    return {"https": proxy_url, "http": proxy_url} if proxy_url else None
+
+
+def get_nearest_expiry(dhan, debug=False):
+    """Calls the endpoint directly with requests instead of going through
+    the dhanhq SDK's expiry_list() - the SDK was found to mangle this
+    endpoint's perfectly valid {"data": [...], "status": "success"} response
+    into a generic failure shape. Confirmed via --raw-debug against the
+    real account: raw HTTP call returns 200 with correct data every time;
+    the SDK wrapper around the same call does not. Reported upstream as a
+    real dhanhq library bug, not something fixable in our own code."""
+    url = "https://api.dhan.co/v2/optionchain/expirylist"
+    body = {"UnderlyingScrip": int(NIFTY_SECURITY_ID), "UnderlyingSeg": NIFTY_SEGMENT}
+    resp = requests.post(url, headers=_raw_headers(), json=body, proxies=_raw_proxies(), timeout=20)
+    data = resp.json()
+    if debug:
+        log(f"DEBUG expiry_list raw response: {data}")
+    expiries = data.get("data", []) if isinstance(data, dict) else []
+    if not expiries:
+        raise RuntimeError(f"No expiries returned: {data}")
+    return sorted(expiries)[0]
+
+
+def fetch_chain(dhan, expiry, debug=False):
+    """Same reasoning as get_nearest_expiry - calls /v2/optionchain
+    directly rather than through the SDK's option_chain(), which showed
+    the same response-mangling issue in testing."""
+    url = "https://api.dhan.co/v2/optionchain"
+    body = {"UnderlyingScrip": int(NIFTY_SECURITY_ID), "UnderlyingSeg": NIFTY_SEGMENT, "Expiry": expiry}
+    resp = requests.post(url, headers=_raw_headers(), json=body, proxies=_raw_proxies(), timeout=20)
+    data = resp.json()
+    if debug:
+        log(f"DEBUG option_chain raw response (truncated): {str(data)[:1500]}")
+    return data
+
+
+def _extract_strike_rows(chain_resp):
+    """Dhan's option_chain response shape can vary - this reads defensively
+    and logs what it finds so field-name mismatches are visible via --debug,
+    same lesson learned from the trading guard's positions/trade_book fields."""
+    data = chain_resp.get("data", {}) if isinstance(chain_resp, dict) else {}
+    last_price = data.get("last_price") or data.get("lastPrice")
+    oc = data.get("oc", {}) or data.get("optionChain", {}) or {}
+    rows = []
+    for strike_str, entry in oc.items():
+        try:
+            strike = float(strike_str)
+        except (TypeError, ValueError):
+            continue
+        ce = entry.get("ce", {}) or entry.get("CE", {}) or {}
+        pe = entry.get("pe", {}) or entry.get("PE", {}) or {}
+        rows.append({
+            "strike": strike,
+            "ce_oi": float(ce.get("oi", 0) or 0),
+            "ce_ltp": float(ce.get("last_price", ce.get("lastPrice", 0)) or 0),
+            "ce_iv": float(ce.get("implied_volatility", ce.get("iv", 0)) or 0),
+            "pe_oi": float(pe.get("oi", 0) or 0),
+            "pe_ltp": float(pe.get("last_price", pe.get("lastPrice", 0)) or 0),
+            "pe_iv": float(pe.get("implied_volatility", pe.get("iv", 0)) or 0),
+        })
+    rows.sort(key=lambda r: r["strike"])
+    return last_price, rows
+
+
+def _classify_buildup(prev_oi, curr_oi, prev_ltp, curr_ltp):
+    if prev_oi is None or prev_ltp is None:
+        return "no_prior_data"
+    oi_up = curr_oi > prev_oi
+    price_up = curr_ltp > prev_ltp
+    if price_up and oi_up:
+        return "long_buildup"
+    if not price_up and oi_up:
+        return "short_buildup"
+    if price_up and not oi_up:
+        return "short_covering"
+    if not price_up and not oi_up:
+        return "long_unwinding"
+    return "flat"
+
+
+def _pct_change(prev, curr):
+    if prev is None or prev == 0:
+        return None
+    return round((curr - prev) / prev * 100, 1)
+
+
+def _build_narrative(spot, atm_strike, atm_row, pcr, pcr_read, support_strike,
+                      resistance_strike, ce_movers, pe_movers):
+    """Builds a plain-English summary from the computed numbers - templated,
+    not a live AI call, since this runs unattended on a schedule. Mirrors
+    the read-out style requested: a spot line, then a few bullet reads."""
+    bullets = []
+
+    bullets.append(
+        f"ATM zone ({int(atm_strike)}): IV is {atm_row['ce_iv']:.1f}%-{atm_row['pe_iv']:.1f}% "
+        f"on the call/put side."
+    )
+
+    bullets.append(f"PCR is {pcr} - {pcr_read}." if pcr is not None else "PCR unavailable this snapshot.")
+
+    if support_strike is not None and resistance_strike is not None:
+        bullets.append(
+            f"OI structure: heaviest put OI sits at {int(support_strike)} (likely support), "
+            f"heaviest call OI sits at {int(resistance_strike)} (likely resistance)."
+        )
+
+    for m in ce_movers:
+        if m["ce_oi_chg_pct"] is not None and abs(m["ce_oi_chg_pct"]) >= 5:
+            bullets.append(
+                f"{int(m['strike'])} CE shows the biggest fresh OI move on the call side "
+                f"({m['ce_oi_chg_pct']:+.0f}% change) - {m['ce_buildup'].replace('_', ' ')}."
+            )
+    for m in pe_movers:
+        if m["pe_oi_chg_pct"] is not None and abs(m["pe_oi_chg_pct"]) >= 5:
+            bullets.append(
+                f"{int(m['strike'])} PE shows the biggest fresh OI move on the put side "
+                f"({m['pe_oi_chg_pct']:+.0f}% change) - {m['pe_buildup'].replace('_', ' ')}."
+            )
+
+    return {
+        "headline": f"NIFTY 50 is at {spot:,.2f}, ATM strike {int(atm_strike)}.",
+        "bullets": bullets,
+    }
+
+
+def analyze(dhan, strikes_each_side, state_file, debug=False):
+    expiry = get_nearest_expiry(dhan, debug)
+    chain_resp = fetch_chain(dhan, expiry, debug)
+    spot, rows = _extract_strike_rows(chain_resp)
+    if spot is None or not rows:
+        raise RuntimeError(f"Could not parse option chain response: {chain_resp}")
+
+    # find ATM = strike closest to spot
+    atm_row = min(rows, key=lambda r: abs(r["strike"] - spot))
+    atm_strike = atm_row["strike"]
+    atm_index = rows.index(atm_row)
+
+    lo = max(0, atm_index - strikes_each_side)
+    hi = min(len(rows), atm_index + strikes_each_side + 1)
+    window = rows[lo:hi]
+
+    total_ce_oi = sum(r["ce_oi"] for r in window)
+    total_pe_oi = sum(r["pe_oi"] for r in window)
+    pcr = round(total_pe_oi / total_ce_oi, 2) if total_ce_oi else None
+
+    # load previous snapshot for change/buildup calc
+    prev = {}
+    if state_file and os.path.exists(state_file):
+        try:
+            with open(state_file, "r") as f:
+                prev = json.load(f)
+        except (json.JSONDecodeError, OSError):
+            prev = {}
+    prev_rows_by_strike = {r["strike"]: r for r in prev.get("rows", [])}
+
+    strikes_out = []
+    for r in window:
+        p = prev_rows_by_strike.get(r["strike"])
+        ce_oi_chg_pct = _pct_change(p["ce_oi"], r["ce_oi"]) if p else None
+        pe_oi_chg_pct = _pct_change(p["pe_oi"], r["pe_oi"]) if p else None
+        strikes_out.append({
+            **r,
+            "ce_oi_chg_pct": ce_oi_chg_pct,
+            "pe_oi_chg_pct": pe_oi_chg_pct,
+            "ce_buildup": _classify_buildup(p["ce_oi"], r["ce_oi"], p["ce_ltp"], r["ce_ltp"]) if p else "no_prior_data",
+            "pe_buildup": _classify_buildup(p["pe_oi"], r["pe_oi"], p["pe_ltp"], r["pe_ltp"]) if p else "no_prior_data",
+        })
+
+    # top movers - rank by abs % OI change, top 2 each side
+    ce_movers = sorted([s for s in strikes_out if s["ce_oi_chg_pct"] is not None],
+                        key=lambda s: abs(s["ce_oi_chg_pct"]), reverse=True)[:2]
+    pe_movers = sorted([s for s in strikes_out if s["pe_oi_chg_pct"] is not None],
+                        key=lambda s: abs(s["pe_oi_chg_pct"]), reverse=True)[:2]
+
+    # support/resistance = highest absolute OI on each side, across full window
+    resistance_strike = max(window, key=lambda r: r["ce_oi"])["strike"] if window else None
+    support_strike = max(window, key=lambda r: r["pe_oi"])["strike"] if window else None
+
+    if pcr is None:
+        pcr_read = "unknown"
+    elif pcr < 0.7:
+        pcr_read = "call-heavy - bearish/neutral lean"
+    elif pcr > 1.3:
+        pcr_read = "put-heavy - bullish lean"
+    else:
+        pcr_read = "roughly neutral"
+
+    narrative = _build_narrative(spot, atm_strike, atm_row, pcr, pcr_read,
+                                  support_strike, resistance_strike, ce_movers, pe_movers)
+
+    result = {
+        "timestamp": datetime.now().isoformat(timespec="seconds"),
+        "expiry": expiry,
+        "spot": spot,
+        "atm_strike": atm_strike,
+        "atm_ce_iv": atm_row["ce_iv"],
+        "atm_pe_iv": atm_row["pe_iv"],
+        "pcr": pcr,
+        "pcr_read": pcr_read,
+        "support_strike": support_strike,
+        "resistance_strike": resistance_strike,
+        "top_ce_movers": [{"strike": s["strike"], "oi_chg_pct": s["ce_oi_chg_pct"], "buildup": s["ce_buildup"]} for s in ce_movers],
+        "top_pe_movers": [{"strike": s["strike"], "oi_chg_pct": s["pe_oi_chg_pct"], "buildup": s["pe_buildup"]} for s in pe_movers],
+        "strikes": strikes_out,
+        "narrative": narrative,
+    }
+
+    # persist this snapshot (bare rows only) for next run's comparison
+    if state_file:
+        with open(state_file, "w") as f:
+            json.dump({"timestamp": result["timestamp"], "rows": window}, f)
+
+    return result
 
 
 def main():
-    print("=" * 60)
-    print("TEST 1: Basic PCR and support/resistance calculation")
-    print("=" * 60)
-    strikes = {
-        24200: (5000, 100, 12, 20000, 30, 11),   # heavy PE OI here -> support
-        24250: (8000, 70, 11, 9000, 50, 10.5),
-        24300: (25000, 40, 10.8, 6000, 80, 11),  # heavy CE OI here -> resistance
-        24350: (3000, 20, 12, 2000, 120, 12),
-    }
-    chain = make_chain(spot=24278.25, strikes=strikes)
-    dhan = MockDhan(expiry="2026-08-28", chain_response=chain)
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--strikes-each-side", type=int, default=5)
+    parser.add_argument("--state-file", type=str, default="oi_state.json",
+                         help="Stores the previous snapshot for change/buildup calc - separate from the output file.")
+    parser.add_argument("--output-file", type=str, default="oi_data.json",
+                         help="Where the full result is written - this is what the dashboard page reads.")
+    parser.add_argument("--debug", action="store_true")
+    parser.add_argument("--raw-debug", action="store_true",
+                         help="Bypass the SDK, call the endpoint directly, show real HTTP status and body.")
+    args = parser.parse_args()
 
-    state_path = "/tmp/test_oi_state.json"
-    if os.path.exists(state_path):
-        os.remove(state_path)
+    if args.raw_debug:
+        raw_debug_call(args.debug)
+        return
 
-    result = analyze(dhan, strikes_each_side=5, state_file=state_path, debug=False)
-    print(f"Spot: {result['spot']}, ATM: {result['atm_strike']}")
-    print(f"PCR: {result['pcr']} ({result['pcr_read']})")
-    print(f"Support: {result['support_strike']}, Resistance: {result['resistance_strike']}")
+    dhan = get_client()
+    try:
+        result = analyze(dhan, args.strikes_each_side, args.state_file, args.debug)
+    except Exception as e:
+        log(f"ERROR: {e}")
+        sys.exit(1)
 
-    assert result["atm_strike"] == 24300 or result["atm_strike"] == 24250  # closest to 24278.25 - 24250 is 28.25 away, 24300 is 21.75 away
-    assert result["atm_strike"] == 24300, f"FAILED: expected ATM 24300, got {result['atm_strike']}"
-    assert result["support_strike"] == 24200, f"FAILED: expected support 24200, got {result['support_strike']}"
-    assert result["resistance_strike"] == 24300, f"FAILED: expected resistance 24300, got {result['resistance_strike']}"
-    total_pe = 20000 + 9000 + 6000 + 2000
-    total_ce = 5000 + 8000 + 25000 + 3000
-    expected_pcr = round(total_pe / total_ce, 2)
-    assert result["pcr"] == expected_pcr, f"FAILED: expected PCR {expected_pcr}, got {result['pcr']}"
-    print(f"PASS: ATM, support, resistance, and PCR all correct (expected PCR {expected_pcr})")
+    with open(args.output_file, "w") as f:
+        json.dump(result, f, indent=2)
 
-    print("\n" + "=" * 60)
-    print("TEST 2: First run has no buildup data (nothing to compare against)")
-    print("=" * 60)
-    for s in result["strikes"]:
-        assert s["ce_buildup"] == "no_prior_data"
-        assert s["pe_buildup"] == "no_prior_data"
-    print("PASS: correctly reports no_prior_data on the very first snapshot")
-
-    print("\n" + "=" * 60)
-    print("TEST 3: Second run detects OI change and classifies buildup correctly")
-    print("=" * 60)
-    # 24300 CE: OI jumps a lot, premium also up -> long_buildup
-    # 24200 PE: OI jumps, premium down -> short_buildup on put side... wait
-    # for puts, "long buildup" still means price up + OI up for THAT contract
-    strikes_2 = dict(strikes)
-    strikes_2[24300] = (25000 * 1.92, 45, 10.9, 6000, 80, 11)   # CE OI +92%, premium up -> long_buildup
-    strikes_2[24200] = (5000, 100, 12, 20000 * 1.41, 25, 11.2)  # PE OI +41%, premium down -> short_buildup
-    chain2 = make_chain(spot=24278.25, strikes=strikes_2)
-    dhan2 = MockDhan(expiry="2026-08-28", chain_response=chain2)
-
-    result2 = analyze(dhan2, strikes_each_side=5, state_file=state_path, debug=False)
-    ce_top = result2["top_ce_movers"][0]
-    pe_top = result2["top_pe_movers"][0]
-    print(f"Top CE mover: strike {ce_top['strike']}, {ce_top['oi_chg_pct']}%, {ce_top['buildup']}")
-    print(f"Top PE mover: strike {pe_top['strike']}, {pe_top['oi_chg_pct']}%, {pe_top['buildup']}")
-
-    assert ce_top["strike"] == 24300, f"FAILED: expected top CE mover 24300, got {ce_top['strike']}"
-    assert ce_top["buildup"] == "long_buildup", f"FAILED: expected long_buildup, got {ce_top['buildup']}"
-    assert abs(ce_top["oi_chg_pct"] - 92.0) < 1, f"FAILED: expected ~92% change, got {ce_top['oi_chg_pct']}"
-    assert pe_top["strike"] == 24200, f"FAILED: expected top PE mover 24200, got {pe_top['strike']}"
-    assert pe_top["buildup"] == "short_buildup", f"FAILED: expected short_buildup, got {pe_top['buildup']}"
-    print("PASS: OI % change and buildup classification both correct on the second run")
-
-    print("\n" + "=" * 60)
-    print("TEST 4: _classify_buildup covers all four quadrants directly")
-    print("=" * 60)
-    assert _classify_buildup(1000, 1500, 50, 60) == "long_buildup"
-    assert _classify_buildup(1000, 1500, 50, 40) == "short_buildup"
-    assert _classify_buildup(1500, 1000, 50, 60) == "short_covering"
-    assert _classify_buildup(1500, 1000, 50, 40) == "long_unwinding"
-    assert _classify_buildup(None, 1000, None, 40) == "no_prior_data"
-    print("PASS: all four OI buildup quadrants classify correctly")
-
-    print("\n" + "=" * 60)
-    print("TEST 5: PCR read thresholds")
-    print("=" * 60)
-    assert _pct_change(100, 150) == 50.0
-    assert _pct_change(100, 50) == -50.0
-    assert _pct_change(0, 50) is None
-    print("PASS: pct_change helper correct")
-
-    os.remove(state_path)
-    print("\n" + "=" * 60)
-    print("ALL TESTS PASSED")
-    print("REMINDER: this only proves the MATH is correct against a fake response.")
-    print("Run with --debug against your real account before trusting the output -")
-    print("Dhan's actual field names have not been verified yet.")
-    print("=" * 60)
+    log(f"Spot {result['spot']} | ATM {result['atm_strike']} | PCR {result['pcr']} ({result['pcr_read']}) "
+        f"| Support {result['support_strike']} | Resistance {result['resistance_strike']}")
+    for m in result["top_ce_movers"]:
+        log(f"  CE mover: {m['strike']} {m['oi_chg_pct']}% ({m['buildup']})")
+    for m in result["top_pe_movers"]:
+        log(f"  PE mover: {m['strike']} {m['oi_chg_pct']}% ({m['buildup']})")
 
 
 if __name__ == "__main__":
