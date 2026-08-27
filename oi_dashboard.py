@@ -66,7 +66,12 @@ def get_client():
     if not client_id or not access_token:
         log("ERROR: Set DHAN_CLIENT_ID and DHAN_ACCESS_TOKEN environment variables first.")
         sys.exit(1)
-    return dhanhq(DhanContext(client_id, access_token))
+    dhan = dhanhq(DhanContext(client_id, access_token))
+    proxy_url = os.environ.get("STATICIP_PROXY_URL")
+    if proxy_url:
+        dhan.dhan_http.session.proxies = {"https": proxy_url, "http": proxy_url}
+        log("Routing requests through the static-IP proxy.")
+    return dhan
 
 
 def get_nearest_expiry(dhan, debug=False):
