@@ -46,9 +46,18 @@
   table { width: 100%; border-collapse: collapse; font-size: 12.5px; }
   th { text-align: right; padding: 7px 8px; color: var(--muted); font-weight: 600; font-size: 10.5px; border-bottom: 1px solid var(--border); }
   th:first-child, td:first-child { text-align: left; }
-  td { text-align: right; padding: 7px 8px; border-bottom: 1px solid var(--border); }
+  td { text-align: right; padding: 7px 8px; border-bottom: 1px solid var(--border); position: relative; }
   .atm-row { background: rgba(217,164,65,0.08); }
   .up { color: var(--green); } .down { color: var(--red); }
+
+  .oi-cell { display: flex; flex-direction: column; align-items: flex-end; gap: 3px; }
+  .oi-bar-track { width: 100%; height: 3px; background: rgba(255,255,255,0.05); border-radius: 2px; overflow: hidden; }
+  .oi-bar-fill-ce { height: 100%; background: #C9932E; border-radius: 2px; }
+  .oi-bar-fill-pe { height: 100%; background: #B06868; border-radius: 2px; }
+
+  .history-wrap { max-height: 320px; overflow-y: auto; border: 1px solid var(--border); border-radius: 8px; }
+  .history-wrap table { font-size: 12px; }
+  .history-wrap thead th { position: sticky; top: 0; background: var(--panel); z-index: 1; }
 
   .mover-card { background: var(--panel2); border-radius: 8px; padding: 10px 12px; margin-bottom: 8px; font-size: 13px; display: flex; justify-content: space-between; align-items: center; }
   .mover-strike { font-weight: 700; }
@@ -67,6 +76,7 @@
 
 <script>
 const DATA_URL = "https://raw.githubusercontent.com/rashmiranjan1434-jpg/dhan-trading-guard/main/oi_data.json";
+const HISTORY_URL = "https://raw.githubusercontent.com/rashmiranjan1434-jpg/dhan-trading-guard/main/oi_history.json";
 const REFRESH_MS = 60000;
 
 function fmtNum(n) {
@@ -96,17 +106,29 @@ async function load() {
     const res = await fetch(DATA_URL + "?t=" + Date.now());
     if (!res.ok) throw new Error("HTTP " + res.status);
     const d = await res.json();
-    render(d);
+
+    let history = [];
+    try {
+      const hRes = await fetch(HISTORY_URL + "?t=" + Date.now());
+      if (hRes.ok) {
+        const hData = await hRes.json();
+        history = hData.snapshots || [];
+      }
+    } catch (e) { /* history is optional - page still works without it */ }
+
+    render(d, history);
   } catch (e) {
     document.getElementById('content').innerHTML =
       '<div class="error">Could not load data: ' + e.message + '<br>Check that oi_data.json exists in the repo.</div>';
   }
 }
 
-function render(d) {
+function render(d, history) {
   document.getElementById('ts').textContent = new Date(d.timestamp).toLocaleTimeString('en-IN');
 
   const bulletsHtml = (d.narrative && d.narrative.bullets ? d.narrative.bullets : []).map(b => '<li>' + b + '</li>').join('');
+  const maxCeOi = Math.max(...d.strikes.map(s => s.ce_oi), 1);
+  const maxPeOi = Math.max(...d.strikes.map(s => s.pe_oi), 1);
 
   const moverRow = (m, label) => `
     <div class="mover-card">
@@ -119,16 +141,58 @@ function render(d) {
   const rowsHtml = d.strikes.map(s => `
     <tr class="${s.strike === d.atm_strike ? 'atm-row' : ''}">
       <td class="mono">${fmtNum(s.strike)}${s.strike === d.atm_strike ? ' •' : ''}</td>
-      <td class="mono">${fmtNum(s.ce_oi)}</td>
+      <td class="mono">
+        <div class="oi-cell">
+          <span>${fmtNum(s.ce_oi)}</span>
+          <div class="oi-bar-track"><div class="oi-bar-fill-ce" style="width:${maxCeOi ? (s.ce_oi / maxCeOi * 100).toFixed(0) : 0}%"></div></div>
+        </div>
+      </td>
       <td class="mono ${pctClass(s.ce_oi_chg_pct)}">${fmtPct(s.ce_oi_chg_pct)}</td>
       <td class="mono">${s.ce_iv.toFixed(1)}</td>
       <td class="mono">${s.pe_iv.toFixed(1)}</td>
       <td class="mono ${pctClass(s.pe_oi_chg_pct)}">${fmtPct(s.pe_oi_chg_pct)}</td>
-      <td class="mono">${fmtNum(s.pe_oi)}</td>
+      <td class="mono">
+        <div class="oi-cell">
+          <span>${fmtNum(s.pe_oi)}</span>
+          <div class="oi-bar-track"><div class="oi-bar-fill-pe" style="width:${maxPeOi ? (s.pe_oi / maxPeOi * 100).toFixed(0) : 0}%"></div></div>
+        </div>
+      </td>
     </tr>
   `).join('');
 
   const headline = (d.narrative && d.narrative.headline) ? d.narrative.headline : d.spot.toLocaleString('en-IN');
+
+  // Intraday history: track the CURRENT support/resistance/ATM strikes' OI
+  // over every past snapshot today, so "at 9:30 this was X, at 10:00 it
+  // was Y" is answerable at a glance for the strikes that matter right now.
+  const lookup = (snap, strike, side) => {
+    const row = snap.strikes.find(s => s.strike === strike);
+    return row ? row[side] : null;
+  };
+  const historyRowsHtml = [...history].reverse().map(h => `
+    <tr>
+      <td class="mono">${h.time}</td>
+      <td class="mono">${fmtNum(h.spot)}</td>
+      <td class="mono">${fmtNum(lookup(h, d.atm_strike, 'ce_oi'))}</td>
+      <td class="mono">${fmtNum(lookup(h, d.atm_strike, 'pe_oi'))}</td>
+      <td class="mono">${fmtNum(lookup(h, d.support_strike, 'pe_oi'))}</td>
+      <td class="mono">${fmtNum(lookup(h, d.resistance_strike, 'ce_oi'))}</td>
+    </tr>
+  `).join('');
+  const historyHtml = history.length > 0 ? `
+    <div class="history-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>Time</th><th>Spot</th>
+            <th>ATM ${fmtNum(d.atm_strike)} CE OI</th><th>ATM ${fmtNum(d.atm_strike)} PE OI</th>
+            <th>Support ${fmtNum(d.support_strike)} PE OI</th><th>Resist. ${fmtNum(d.resistance_strike)} CE OI</th>
+          </tr>
+        </thead>
+        <tbody>${historyRowsHtml}</tbody>
+      </table>
+    </div>
+  ` : '<div class="sub">No history yet today - builds up as the page runs through the session.</div>';
 
   document.getElementById('content').innerHTML = `
     <div class="briefing">
@@ -173,6 +237,9 @@ function render(d) {
       </thead>
       <tbody>${rowsHtml}</tbody>
     </table>
+
+    <div class="section-title">Intraday history — support / resistance / ATM</div>
+    ${historyHtml}
 
     <div class="disclaimer">
       This shows market structure only — it does not generate buy or sell signals. Refreshes every ${REFRESH_MS/1000}s.
