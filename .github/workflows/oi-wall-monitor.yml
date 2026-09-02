@@ -1,0 +1,63 @@
+name: OI Wall Monitor
+
+# Triggered externally by cron-job.org every 1 minute during market hours
+# (closest practical interval to the original 30s design - GitHub Actions'
+# own startup overhead plus cron-job.org's free-tier granularity make 30s
+# unrealistic to promise). No `schedule:` trigger - GitHub's own scheduler
+# proved unreliable for the other workflows in this repo.
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "What to run"
+        required: true
+        default: "run"
+        type: choice
+        options:
+          - run
+          - raw-debug
+
+jobs:
+  monitor:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install requests
+
+      - name: Run wall monitor check
+        if: github.event.inputs.mode == 'run' || github.event.inputs.mode == ''
+        env:
+          DHAN_CLIENT_ID: ${{ secrets.DHAN_CLIENT_ID }}
+          DHAN_ACCESS_TOKEN: ${{ secrets.DHAN_ACCESS_TOKEN }}
+          STATICIP_PROXY_URL: ${{ secrets.STATICIP_PROXY_URL }}
+        run: |
+          python3 oi_wall_monitor.py \
+            --state-file oi_wall_state.json \
+            --output-file oi_wall_data.json
+
+      - name: Raw debug call
+        if: github.event.inputs.mode == 'raw-debug'
+        env:
+          DHAN_CLIENT_ID: ${{ secrets.DHAN_CLIENT_ID }}
+          DHAN_ACCESS_TOKEN: ${{ secrets.DHAN_ACCESS_TOKEN }}
+          STATICIP_PROXY_URL: ${{ secrets.STATICIP_PROXY_URL }}
+        run: python3 oi_wall_monitor.py --raw-debug --debug
+
+      - name: Commit updated state files
+        if: github.event.inputs.mode == 'run' || github.event.inputs.mode == ''
+        run: |
+          git config user.name "trading-guard-bot"
+          git config user.email "actions@users.noreply.github.com"
+          git add oi_wall_state.json oi_wall_data.json
+          git diff --quiet --cached || git commit -m "Update wall monitor data [skip ci]"
+          git push
