@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Nifty OI Dashboard</title>
+<title>OI Wall Monitor</title>
 <style>
   :root {
     --bg: #121310; --panel: #1A1B14; --panel2: #1F2117; --border: #2E2F24;
@@ -22,7 +22,7 @@
   .title { font-size: 11px; text-transform: uppercase; letter-spacing: 0.16em; color: var(--muted); }
   .ts { font-size: 11px; color: var(--muted); }
 
-  .briefing {
+  .status-card {
     background: linear-gradient(180deg, #1D1E15, #171812);
     border: 1px solid var(--border);
     border-left: 3px solid var(--amber);
@@ -30,11 +30,11 @@
     padding: 20px 22px;
     margin-bottom: 20px;
   }
-  .briefing-eyebrow { font-size: 10.5px; text-transform: uppercase; letter-spacing: 0.12em; color: var(--amber-dim); margin-bottom: 8px; }
-  .briefing-headline { font-size: 22px; font-weight: 700; margin-bottom: 14px; }
-  .briefing ul { margin: 0; padding-left: 0; list-style: none; }
-  .briefing li { font-size: 14.5px; line-height: 1.65; margin-bottom: 8px; padding-left: 16px; position: relative; color: #D9D5C4; }
-  .briefing li::before { content: "—"; position: absolute; left: 0; color: var(--amber-dim); }
+  .status-card.grabbed { border-left-color: var(--amber); }
+  .status-card.reversed { border-left-color: var(--green); }
+  .status-eyebrow { font-size: 10.5px; text-transform: uppercase; letter-spacing: 0.12em; color: var(--amber-dim); margin-bottom: 8px; }
+  .status-headline { font-size: 20px; font-weight: 700; margin-bottom: 12px; }
+  .status-sub { font-size: 13px; color: #D9D5C4; line-height: 1.6; }
 
   .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-bottom: 20px; }
   .card { background: var(--panel); border-radius: 10px; padding: 12px 14px; border: 1px solid var(--border); }
@@ -42,25 +42,17 @@
   .val { font-size: 18px; font-weight: 700; }
   .sub { font-size: 12px; color: var(--muted); margin-top: 2px; }
 
+  .distance-track { width: 100%; height: 6px; background: rgba(255,255,255,0.06); border-radius: 3px; margin-top: 8px; overflow: hidden; }
+  .distance-fill { height: 100%; background: var(--amber); border-radius: 3px; }
+
   .section-title { font-size: 11px; text-transform: uppercase; letter-spacing: 0.1em; color: var(--muted); margin: 22px 0 10px; padding-top: 16px; border-top: 1px solid var(--border); }
-  table { width: 100%; border-collapse: collapse; font-size: 12.5px; }
-  th { text-align: right; padding: 7px 8px; color: var(--muted); font-weight: 600; font-size: 10.5px; border-bottom: 1px solid var(--border); }
-  th:first-child, td:first-child { text-align: left; }
-  td { text-align: right; padding: 7px 8px; border-bottom: 1px solid var(--border); position: relative; }
-  .atm-row { background: rgba(217,164,65,0.08); }
-  .up { color: var(--green); } .down { color: var(--red); }
 
-  .oi-cell { display: flex; flex-direction: column; align-items: flex-end; gap: 3px; }
-  .oi-bar-track { width: 100%; height: 3px; background: rgba(255,255,255,0.05); border-radius: 2px; overflow: hidden; }
-  .oi-bar-fill-ce { height: 100%; background: #C9932E; border-radius: 2px; }
-  .oi-bar-fill-pe { height: 100%; background: #B06868; border-radius: 2px; }
+  .alert-feed { max-height: 400px; overflow-y: auto; }
+  .alert-item { background: var(--panel2); border-radius: 8px; padding: 10px 12px; margin-bottom: 6px; font-size: 12.5px; line-height: 1.5; border-left: 2px solid var(--border); }
+  .alert-item.grab { border-left-color: var(--amber); color: #F0DFB0; }
+  .alert-item.reversal { border-left-color: var(--green); color: #C9E5CC; }
+  .alert-item.defended { color: var(--muted); }
 
-  .history-wrap { max-height: 320px; overflow-y: auto; border: 1px solid var(--border); border-radius: 8px; }
-  .history-wrap table { font-size: 12px; }
-  .history-wrap thead th { position: sticky; top: 0; background: var(--panel); z-index: 1; }
-
-  .mover-card { background: var(--panel2); border-radius: 8px; padding: 10px 12px; margin-bottom: 8px; font-size: 13px; display: flex; justify-content: space-between; align-items: center; }
-  .mover-strike { font-weight: 700; }
   .disclaimer { font-size: 11px; color: var(--muted); line-height: 1.6; margin-top: 24px; padding-top: 14px; border-top: 1px solid var(--border); }
   .error { background: #241514; border: 1px solid #4A2320; color: #E29891; padding: 12px; border-radius: 8px; }
 </style>
@@ -68,37 +60,19 @@
 <body>
 <div class="wrap">
   <div class="header">
-    <div class="title">Nifty OI Dashboard</div>
+    <div class="title">OI Wall Monitor — Nifty</div>
     <div class="ts mono" id="ts">loading...</div>
   </div>
   <div id="content">Loading data...</div>
 </div>
 
 <script>
-const DATA_URL = "https://raw.githubusercontent.com/rashmiranjan1434-jpg/dhan-trading-guard/main/oi_data.json";
-const HISTORY_URL = "https://raw.githubusercontent.com/rashmiranjan1434-jpg/dhan-trading-guard/main/oi_history.json";
+const DATA_URL = "https://raw.githubusercontent.com/rashmiranjan1434-jpg/dhan-trading-guard/main/oi_wall_data.json";
 const REFRESH_MS = 60000;
 
 function fmtNum(n) {
   if (n === null || n === undefined) return "-";
   return Math.round(n).toLocaleString('en-IN');
-}
-function fmtPct(n) {
-  if (n === null || n === undefined) return "-";
-  const sign = n > 0 ? "+" : "";
-  return sign + n.toFixed(1) + "%";
-}
-function buildupLabel(b) {
-  const map = {
-    long_buildup: "Long Buildup", short_buildup: "Short Buildup",
-    short_covering: "Short Covering", long_unwinding: "Long Unwinding",
-    no_prior_data: "No prior data", flat: "Flat"
-  };
-  return map[b] || b;
-}
-function pctClass(n) {
-  if (n === null || n === undefined) return "";
-  return n > 0 ? "up" : (n < 0 ? "down" : "");
 }
 
 async function load() {
@@ -106,144 +80,77 @@ async function load() {
     const res = await fetch(DATA_URL + "?t=" + Date.now());
     if (!res.ok) throw new Error("HTTP " + res.status);
     const d = await res.json();
-
-    let history = [];
-    try {
-      const hRes = await fetch(HISTORY_URL + "?t=" + Date.now());
-      if (hRes.ok) {
-        const hData = await hRes.json();
-        history = hData.snapshots || [];
-      }
-    } catch (e) { /* history is optional - page still works without it */ }
-
-    render(d, history);
+    render(d);
   } catch (e) {
     document.getElementById('content').innerHTML =
-      '<div class="error">Could not load data: ' + e.message + '<br>Check that oi_data.json exists in the repo.</div>';
+      '<div class="error">Could not load data: ' + e.message + '<br>Check that oi_wall_data.json exists in the repo (it appears after the first workflow run).</div>';
   }
 }
 
-function render(d, history) {
-  document.getElementById('ts').textContent = new Date(d.timestamp).toLocaleTimeString('en-IN');
+function alertClass(text) {
+  if (text.includes('GRAB CONFIRMED')) return 'grab';
+  if (text.includes('REVERSAL CONFIRMED')) return 'reversal';
+  if (text.includes('defended')) return 'defended';
+  return '';
+}
 
-  const bulletsHtml = (d.narrative && d.narrative.bullets ? d.narrative.bullets : []).map(b => '<li>' + b + '</li>').join('');
-  const maxCeOi = Math.max(...d.strikes.map(s => s.ce_oi), 1);
-  const maxPeOi = Math.max(...d.strikes.map(s => s.pe_oi), 1);
+function render(d) {
+  const snap = d.snapshot;
+  const state = d.state;
+  document.getElementById('ts').textContent = new Date(snap.timestamp).toLocaleTimeString('en-IN');
 
-  const moverRow = (m, label) => `
-    <div class="mover-card">
-      <span><span class="mover-strike">${label} ${fmtNum(m.strike)}</span> &nbsp; <span class="${pctClass(m.oi_chg_pct)} mono">${fmtPct(m.oi_chg_pct)}</span></span>
-      <span class="sub">${buildupLabel(m.buildup)}</span>
-    </div>`;
-  const ceMoversHtml = d.top_ce_movers.map(m => moverRow(m, 'CE')).join('') || '<div class="sub">No change data yet.</div>';
-  const peMoversHtml = d.top_pe_movers.map(m => moverRow(m, 'PE')).join('') || '<div class="sub">No change data yet.</div>';
+  let statusHeadline, statusSub, cardClass = '';
+  if (!state.strongest_side) {
+    statusHeadline = "No clear OI cluster yet";
+    statusSub = "Waiting for a 2-strike cluster to form on either side.";
+  } else if (state.grab_flagged) {
+    cardClass = 'grabbed';
+    statusHeadline = `GRAB FLAGGED — watching for reversal`;
+    statusSub = `Price hit the ${state.strongest_side} wall at ${fmtNum(state.wall_strike)} with a confirmed OI drop. Watching the next 10 minutes for a move back.`;
+  } else {
+    statusHeadline = `Strongest side: ${state.strongest_side}`;
+    statusSub = `Watching wall at ${fmtNum(state.wall_strike)}. Spot currently ${fmtNum(snap.spot)}.`;
+  }
 
-  const rowsHtml = d.strikes.map(s => `
-    <tr class="${s.strike === d.atm_strike ? 'atm-row' : ''}">
-      <td class="mono">${fmtNum(s.strike)}${s.strike === d.atm_strike ? ' •' : ''}</td>
-      <td class="mono">
-        <div class="oi-cell">
-          <span>${fmtNum(s.ce_oi)}</span>
-          <div class="oi-bar-track"><div class="oi-bar-fill-ce" style="width:${maxCeOi ? (s.ce_oi / maxCeOi * 100).toFixed(0) : 0}%"></div></div>
-        </div>
-      </td>
-      <td class="mono ${pctClass(s.ce_oi_chg_pct)}">${fmtPct(s.ce_oi_chg_pct)}</td>
-      <td class="mono">${s.ce_iv.toFixed(1)}</td>
-      <td class="mono">${s.pe_iv.toFixed(1)}</td>
-      <td class="mono ${pctClass(s.pe_oi_chg_pct)}">${fmtPct(s.pe_oi_chg_pct)}</td>
-      <td class="mono">
-        <div class="oi-cell">
-          <span>${fmtNum(s.pe_oi)}</span>
-          <div class="oi-bar-track"><div class="oi-bar-fill-pe" style="width:${maxPeOi ? (s.pe_oi / maxPeOi * 100).toFixed(0) : 0}%"></div></div>
-        </div>
-      </td>
-    </tr>
-  `).join('');
+  const distance = state.wall_strike ? Math.abs(snap.spot - state.wall_strike) : null;
+  const distancePct = distance !== null ? Math.max(0, Math.min(100, 100 - (distance / 50 * 100))) : 0;
 
-  const headline = (d.narrative && d.narrative.headline) ? d.narrative.headline : d.spot.toLocaleString('en-IN');
-
-  // Intraday history: track the CURRENT support/resistance/ATM strikes' OI
-  // over every past snapshot today, so "at 9:30 this was X, at 10:00 it
-  // was Y" is answerable at a glance for the strikes that matter right now.
-  const lookup = (snap, strike, side) => {
-    const row = snap.strikes.find(s => s.strike === strike);
-    return row ? row[side] : null;
-  };
-  const historyRowsHtml = [...history].reverse().map(h => `
-    <tr>
-      <td class="mono">${h.time}</td>
-      <td class="mono">${fmtNum(h.spot)}</td>
-      <td class="mono">${fmtNum(lookup(h, d.atm_strike, 'ce_oi'))}</td>
-      <td class="mono">${fmtNum(lookup(h, d.atm_strike, 'pe_oi'))}</td>
-      <td class="mono">${fmtNum(lookup(h, d.support_strike, 'pe_oi'))}</td>
-      <td class="mono">${fmtNum(lookup(h, d.resistance_strike, 'ce_oi'))}</td>
-    </tr>
-  `).join('');
-  const historyHtml = history.length > 0 ? `
-    <div class="history-wrap">
-      <table>
-        <thead>
-          <tr>
-            <th>Time</th><th>Spot</th>
-            <th>ATM ${fmtNum(d.atm_strike)} CE OI</th><th>ATM ${fmtNum(d.atm_strike)} PE OI</th>
-            <th>Support ${fmtNum(d.support_strike)} PE OI</th><th>Resist. ${fmtNum(d.resistance_strike)} CE OI</th>
-          </tr>
-        </thead>
-        <tbody>${historyRowsHtml}</tbody>
-      </table>
-    </div>
-  ` : '<div class="sub">No history yet today - builds up as the page runs through the session.</div>';
+  const alertsHtml = (state.alerts || []).slice().reverse().map(a =>
+    `<div class="alert-item ${alertClass(a)}">${a}</div>`
+  ).join('') || '<div class="sub">No alerts yet today.</div>';
 
   document.getElementById('content').innerHTML = `
-    <div class="briefing">
-      <div class="briefing-eyebrow">Snapshot read</div>
-      <div class="briefing-headline mono">${headline}</div>
-      <ul>${bulletsHtml}</ul>
+    <div class="status-card ${cardClass}">
+      <div class="status-eyebrow">Live status</div>
+      <div class="status-headline mono">${statusHeadline}</div>
+      <div class="status-sub">${statusSub}</div>
     </div>
 
     <div class="grid">
       <div class="card">
-        <div class="lbl">PCR</div>
-        <div class="val mono">${d.pcr ?? '-'}</div>
-        <div class="sub">${d.pcr_read}</div>
+        <div class="lbl">Spot</div>
+        <div class="val mono">${fmtNum(snap.spot)}</div>
       </div>
       <div class="card">
-        <div class="lbl">ATM IV (CE / PE)</div>
-        <div class="val mono">${d.atm_ce_iv.toFixed(1)} / ${d.atm_pe_iv.toFixed(1)}</div>
-        <div class="sub">Strike ${fmtNum(d.atm_strike)}</div>
+        <div class="lbl">Wall strike</div>
+        <div class="val mono">${fmtNum(state.wall_strike)}</div>
+        <div class="sub">${state.strongest_side || '-'} side</div>
       </div>
-      <div class="card">
-        <div class="lbl">Resistance</div>
-        <div class="val mono">${fmtNum(d.resistance_strike)}</div>
-        <div class="sub">Highest call OI</div>
-      </div>
-      <div class="card">
-        <div class="lbl">Support</div>
-        <div class="val mono">${fmtNum(d.support_strike)}</div>
-        <div class="sub">Highest put OI</div>
+      <div class="card" style="grid-column: 1 / 3;">
+        <div class="lbl">Distance to wall</div>
+        <div class="val mono">${distance !== null ? fmtNum(distance) + ' pts' : '-'}</div>
+        <div class="distance-track"><div class="distance-fill" style="width:${distancePct}%"></div></div>
       </div>
     </div>
 
-    <div class="section-title">Fresh OI — Call side</div>
-    ${ceMoversHtml}
-
-    <div class="section-title">Fresh OI — Put side</div>
-    ${peMoversHtml}
-
-    <div class="section-title">Chain (${d.strikes.length} strikes, expiry ${d.expiry})</div>
-    <table>
-      <thead>
-        <tr><th>Strike</th><th>CE OI</th><th>CE Chg</th><th>CE IV</th><th>PE IV</th><th>PE Chg</th><th>PE OI</th></tr>
-      </thead>
-      <tbody>${rowsHtml}</tbody>
-    </table>
-
-    <div class="section-title">Intraday history — support / resistance / ATM</div>
-    ${historyHtml}
+    <div class="section-title">Today's alert feed</div>
+    <div class="alert-feed">${alertsHtml}</div>
 
     <div class="disclaimer">
-      This shows market structure only — it does not generate buy or sell signals. Refreshes every ${REFRESH_MS/1000}s.
-      "Buildup" needs two snapshots to compute, so the first read of the day shows "No prior data."
+      Decision support only — this never places trades. Grab/reversal calls need an
+      OI cluster (2 strikes within 15% OI of each other) and an 8%+ OI drop at the
+      wall to confirm. Refreshes every ${REFRESH_MS/1000}s. Pre-9:30 readings are
+      logged but not acted on.
     </div>
   `;
 }
