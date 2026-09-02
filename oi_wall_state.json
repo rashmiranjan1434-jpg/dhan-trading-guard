@@ -1,0 +1,10 @@
+{
+  "date": "2026-09-02",
+  "strongest_side": "CALL",
+  "wall_strike": 24000.0,
+  "grab_flagged": false,
+  "reversal_watch_until": null,
+  "alerts": [
+    "[11:49:50] STRONGEST SIDE: CALL - cluster at 24000.0 (OI 8,949,655) & 24100.0 (OI 8,057,075). Watching wall at 24000.0."
+  ]
+}

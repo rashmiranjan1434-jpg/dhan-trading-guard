@@ -1,0 +1,96 @@
+{
+  "snapshot": {
+    "timestamp": "2026-09-02T11:49:50",
+    "spot": 23914.45,
+    "atm": 23900.0,
+    "strikes": [
+      {
+        "strike": 23650.0,
+        "call_oi": 116155,
+        "call_oi_change": 108290,
+        "put_oi": 1758835,
+        "put_oi_change": 504855
+      },
+      {
+        "strike": 23700.0,
+        "call_oi": 487175,
+        "call_oi_change": 368940,
+        "put_oi": 4480710,
+        "put_oi_change": 1674400
+      },
+      {
+        "strike": 23750.0,
+        "call_oi": 384800,
+        "call_oi_change": 331305,
+        "put_oi": 2499705,
+        "put_oi_change": 1603615
+      },
+      {
+        "strike": 23800.0,
+        "call_oi": 2687295,
+        "call_oi_change": 2120885,
+        "put_oi": 7894510,
+        "put_oi_change": 4878900
+      },
+      {
+        "strike": 23850.0,
+        "call_oi": 2169895,
+        "call_oi_change": 2051270,
+        "put_oi": 3821025,
+        "put_oi_change": 3116880
+      },
+      {
+        "strike": 23900.0,
+        "call_oi": 6284070,
+        "call_oi_change": 4917315,
+        "put_oi": 5951140,
+        "put_oi_change": 2602080
+      },
+      {
+        "strike": 23950.0,
+        "call_oi": 2452580,
+        "call_oi_change": 1721785,
+        "put_oi": 1240720,
+        "put_oi_change": 122980
+      },
+      {
+        "strike": 24000.0,
+        "call_oi": 8949655,
+        "call_oi_change": 3175770,
+        "put_oi": 4370535,
+        "put_oi_change": -979550
+      },
+      {
+        "strike": 24050.0,
+        "call_oi": 3937310,
+        "call_oi_change": 1769950,
+        "put_oi": 654160,
+        "put_oi_change": -631475
+      },
+      {
+        "strike": 24100.0,
+        "call_oi": 8057075,
+        "call_oi_change": 1636570,
+        "put_oi": 2537340,
+        "put_oi_change": -928330
+      },
+      {
+        "strike": 24150.0,
+        "call_oi": 4429295,
+        "call_oi_change": 261300,
+        "put_oi": 560235,
+        "put_oi_change": -118365
+      }
+    ]
+  },
+  "state": {
+    "date": "2026-09-02",
+    "strongest_side": "CALL",
+    "wall_strike": 24000.0,
+    "grab_flagged": false,
+    "reversal_watch_until": null,
+    "alerts": [
+      "[11:49:50] STRONGEST SIDE: CALL - cluster at 24000.0 (OI 8,949,655) & 24100.0 (OI 8,057,075). Watching wall at 24000.0."
+    ]
+  }
+}
