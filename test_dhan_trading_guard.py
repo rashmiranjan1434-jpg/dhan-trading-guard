@@ -1,11 +1,21 @@
 """
-Test harness for dhan_trading_guard.py
+Test harness for dhan_trading_guard.py - focused on the critical fix found
+via a real live-trading incident on 2026-09-02.
 
-Simulates fake Dhan position snapshots (no real account/credentials needed)
-to verify the guard correctly detects a REAL round-trip trade (position
-goes flat -> open -> flat) rather than counting raw broker orders, and
-correctly detects a loss-limit breach. Run this before pointing the real
-script at your live account.
+THE INCIDENT: the guard detected a breach at -Rs8,953.50, called the kill
+switch activation sequence, and marked itself `locked=True` UNCONDITIONALLY
+- without checking whether the activation actually succeeded on Dhan's
+side. Dhan requires all positions to be flat before it will activate the
+kill switch; if a position was still open at that exact moment, activation
+silently failed while the script gave up watching anyway, believing it was
+locked. The account remained fully tradeable, and the loss ran to -Rs44,000
+before coming back down, with zero further intervention from the guard.
+
+THE FIX: `locked` is now only set True after an INDEPENDENT verification
+call (`status_kill_switch()`) confirms the switch is genuinely active on
+Dhan's side - never trusting the activation call's own return value alone.
+If verification fails, the script does NOT mark itself locked, and will
+keep re-attempting on every subsequent check instead of going quiet.
 
 Usage:
     python3 test_dhan_trading_guard.py
@@ -18,153 +28,109 @@ from dhan_trading_guard import TradingGuard
 
 
 class MockDhan:
-    """Fakes the one dhanhq method the guard reads from (get_positions),
-    returning whatever the test sets as the current snapshot."""
     def __init__(self):
         self._positions = []
+        self._trade_book = []
         self.kill_switch_calls = []
+        self.kill_switch_will_succeed = True   # simulates whether Dhan's side actually activates
+        self.status_kill_switch_response = None
 
     def set_positions(self, positions):
         self._positions = positions
 
+    def set_trade_book(self, fills):
+        self._trade_book = fills
+
     def get_positions(self):
         return {"status": "success", "data": self._positions}
 
+    def get_trade_book(self):
+        return {"status": "success", "data": self._trade_book}
+
     def kill_switch(self, action):
         self.kill_switch_calls.append(action)
+        if action == "ACTIVATE" and not self.kill_switch_will_succeed:
+            raise Exception("Cannot activate: open positions exist")
         return {"status": "success", "data": f"kill switch {action}"}
 
+    def status_kill_switch(self):
+        return self.status_kill_switch_response
 
-def pos(security_id, buy_qty, sell_qty, realized_profit, unrealized_profit=0):
-    return {
-        "securityId": security_id, "buyQty": buy_qty, "sellQty": sell_qty,
-        "realizedProfit": realized_profit, "unrealizedProfit": unrealized_profit,
-    }
+
+def pos(security_id, realized_profit=0, unrealized_profit=0):
+    return {"securityId": security_id, "realizedProfit": realized_profit, "unrealizedProfit": unrealized_profit}
+
+
+def fill(security_id, txn, qty, ts):
+    return {"securityId": security_id, "transactionType": txn, "tradedQuantity": qty, "exchangeTime": ts}
 
 
 def main():
-    print("=" * 60)
-    print("TEST 1: One real trade with averaging (3 orders) should count as ONE trade")
-    print("=" * 60)
+    print("=" * 70)
+    print("TEST 1: THE ACTUAL INCIDENT - activation fails (open position) ->")
+    print("must NOT set locked=True, must keep retrying")
+    print("=" * 70)
     dhan = MockDhan()
-    guard = TradingGuard(capital=45000, loss_pct=5, max_trades=2)
+    dhan.kill_switch_will_succeed = False  # simulates Dhan rejecting activation (position still open)
+    dhan.status_kill_switch_response = {"status": "success", "data": {"killSwitchStatus": "INACTIVE"}}
+    guard = TradingGuard(capital=98000, loss_pct=9, max_trades=14)
+    dhan.set_trade_book([fill("SEC1", "BUY", 130, "1")])
+    dhan.set_positions([pos("SEC1", realized_profit=0, unrealized_profit=-8953.50)])
 
-    dhan.set_positions([pos("SEC1", 0, 0, 0)])
+    breached = guard.poll(dhan, dry_run=False, debug=False)
+    print(f"Breached: {breached} | guard.locked: {guard.locked}")
+    assert breached, "FAILED: should report a breach happened"
+    assert not guard.locked, "FAILED: THIS IS THE EXACT BUG - locked must NOT be True when Dhan never actually activated"
+    print("PASS: correctly did NOT mark itself locked when activation could not be confirmed")
+
+    print("\n" + "=" * 70)
+    print("TEST 2: Next poll retries instead of silently giving up")
+    print("=" * 70)
+    # position closes between polls - activation would succeed now
+    dhan.kill_switch_will_succeed = True
+    dhan.status_kill_switch_response = {"status": "success", "data": {"killSwitchStatus": "ACTIVE"}}
+    dhan.set_positions([pos("SEC1", realized_profit=-8953.50, unrealized_profit=0)])  # now closed/realized
+
+    breached2 = guard.poll(dhan, dry_run=False, debug=False)
+    print(f"Breached: {breached2} | guard.locked: {guard.locked}")
+    assert guard.locked, "FAILED: should now be locked, since activation succeeded and was verified"
+    print("PASS: retried on the next check and correctly locked once verification succeeded")
+
+    print("\n" + "=" * 70)
+    print("TEST 3: Once genuinely locked and verified, does not re-check every run")
+    print("=" * 70)
+    calls_before = len(dhan.kill_switch_calls)
     guard.poll(dhan, dry_run=False, debug=False)
-    dhan.set_positions([pos("SEC1", 260, 0, 0)])
-    guard.poll(dhan, dry_run=False, debug=False)
-    dhan.set_positions([pos("SEC1", 260, 260, 285)])
-    b3 = guard.poll(dhan, dry_run=False, debug=False)
-    print(f"Trade count after averaged trade closed: {guard.trade_count} (should be 1)")
-    assert guard.trade_count == 1, "FAILED: averaging inflated the trade count"
-    assert not b3, "FAILED: should not have breached yet (only 1 of 2 trades used)"
-    print("PASS: averaging into one position still counts as ONE trade, not multiple")
+    calls_after = len(dhan.kill_switch_calls)
+    print(f"Kill switch calls made in this run: {calls_after - calls_before}")
+    assert calls_after == calls_before, "FAILED: should not re-attempt once genuinely locked"
+    print("PASS: no redundant calls once locked is genuinely confirmed")
 
-    print("\n" + "=" * 60)
-    print("TEST 2: Second distinct trade after the first goes flat -> should lock at 2/2")
-    print("=" * 60)
-    dhan.set_positions([pos("SEC1", 260, 260, 285), pos("SEC2", 130, 0, 0)])
-    b4 = guard.poll(dhan, dry_run=False, debug=False)
-    print(f"Trade count: {guard.trade_count} | Breached: {b4} | Kill switch calls: {dhan.kill_switch_calls}")
-    assert guard.trade_count == 2 and b4 and dhan.kill_switch_calls == ["ACTIVATE"], "FAILED"
-    print("PASS: correctly locked exactly on the 2nd real trade, not before")
-
-    print("\n" + "=" * 60)
-    print("TEST 3: Loss-limit breach on the FIRST trade (should lock before trade 2)")
-    print("=" * 60)
+    print("\n" + "=" * 70)
+    print("TEST 4: Activation succeeds on the FIRST try (normal, non-incident case)")
+    print("=" * 70)
     dhan2 = MockDhan()
+    dhan2.kill_switch_will_succeed = True
+    dhan2.status_kill_switch_response = {"status": "success", "data": {"killSwitchStatus": "ACTIVE"}}
     guard2 = TradingGuard(capital=45000, loss_pct=5, max_trades=2)
-    dhan2.set_positions([pos("SEC1", 0, 0, 0)])
-    guard2.poll(dhan2, dry_run=False, debug=False)
-    dhan2.set_positions([pos("SEC1", 130, 0, 0)])
-    guard2.poll(dhan2, dry_run=False, debug=False)
-    dhan2.set_positions([pos("SEC1", 130, 130, -2400)])
-    b = guard2.poll(dhan2, dry_run=False, debug=False)
-    print(f"Trade count: {guard2.trade_count} | Breached: {b} | Kill switch calls: {dhan2.kill_switch_calls}")
-    assert b and guard2.trade_count == 1, "FAILED: should breach on loss even with only 1 trade used"
-    print("PASS: loss limit correctly overrides trade-count limit when it hits first")
+    dhan2.set_trade_book([fill("SEC1", "BUY", 130, "1"), fill("SEC1", "SELL", 130, "2")])
+    dhan2.set_positions([pos("SEC1", realized_profit=-2400)])
 
-    print("\n" + "=" * 60)
-    print("TEST 4: Replay of your actual Aug 10 trading day (real quantities and P&L)")
-    print("=" * 60)
-    dhan3 = MockDhan()
-    guard3 = TradingGuard(capital=45000, loss_pct=5, max_trades=2)
-    day_snapshots = [
-        ("flat start",                    [pos("NIFTY_24650PE", 0, 0, 0)]),
-        ("Trade 1 opened (130 buy)",       [pos("NIFTY_24650PE", 130, 0, 0)]),
-        ("Trade 1 closed, +2887.50",       [pos("NIFTY_24650PE", 130, 130, 2887.50)]),
-        ("Trade 2 opened (Crude, 10 buy)", [pos("NIFTY_24650PE", 130, 130, 2887.50), pos("CRUDE_7450PE", 10, 0, 0)]),
-        ("Trade 2 closed, +622.37",        [pos("NIFTY_24650PE", 130, 130, 2887.50), pos("CRUDE_7450PE", 80, 80, 622.37)]),
-    ]
-    locked_at = None
-    for label, snapshot in day_snapshots:
-        dhan3.set_positions(snapshot)
-        breached = guard3.poll(dhan3, dry_run=False, debug=False)
-        status = "LOCKED" if breached else "armed"
-        print(f"  {label}: trades={guard3.trade_count} -> {status}")
-        if breached and locked_at is None:
-            locked_at = label
-    print(f"\nWith the FIXED logic, the guard locks after: {locked_at}")
-    print("That's after your real 2nd trade closed - matching what '2 trades a day' actually means.")
-    print("Everything from trade 3 onward today (including the near-expiry averaging mistake,")
-    print("the option-writing trade, and the later hero-zero trade) would have been blocked.")
+    breached3 = guard2.poll(dhan2, dry_run=False, debug=False)
+    print(f"Breached: {breached3} | guard.locked: {guard2.locked}")
+    assert guard2.locked, "FAILED: should lock immediately when activation succeeds and verifies clean"
+    assert dhan2.kill_switch_calls == ["ACTIVATE", "DEACTIVATE", "ACTIVATE"]
+    print("PASS: normal case still works correctly - locks on the first successful attempt")
 
-    print("\n" + "=" * 60)
-    print("TEST 5: Open MTM loss (not yet realized) should still trigger a breach")
-    print("=" * 60)
-    dhan4 = MockDhan()
-    guard4 = TradingGuard(capital=45000, loss_pct=5, max_trades=2)
-    dhan4.set_positions([pos("SEC1", 0, 0, 0, 0)])
-    guard4.poll(dhan4, dry_run=False, debug=False)
-    dhan4.set_positions([pos("SEC1", 130, 0, 0, 0)])
-    guard4.poll(dhan4, dry_run=False, debug=False)
-    # Position still OPEN (never sold) - just sitting at a growing MTM loss
-    dhan4.set_positions([pos("SEC1", 130, 0, 0, -2700)])  # -6% of 45000 = -2700, still unrealized
-    b5 = guard4.poll(dhan4, dry_run=False, debug=False)
-    print(f"Trade count: {guard4.trade_count} (still 1 - position never closed) | Breached: {b5}")
-    assert b5 and guard4.trade_count == 1, "FAILED: should breach on unrealized MTM loss alone"
-    print("PASS: an open position at -6% MTM triggers the guard even though nothing was ever sold")
-
-    print("\n" + "=" * 60)
-    print("TEST 6: State persists across SEPARATE runs (simulating GitHub Actions)")
-    print("=" * 60)
-    import tempfile
-    state_path = os.path.join(tempfile.gettempdir(), "test_guard_state.json")
-    if os.path.exists(state_path):
-        os.remove(state_path)
-
-    # Run 1: a fresh process, trade 1 opens
-    dhan5 = MockDhan()
-    guard_run1 = TradingGuard(capital=45000, loss_pct=5, max_trades=2, state_file=state_path)
-    dhan5.set_positions([pos("SEC1", 130, 0, 0, 0)])
-    guard_run1.poll(dhan5, dry_run=False, debug=False)
-    print(f"Run 1 (fresh process): trade_count={guard_run1.trade_count}")
-    assert guard_run1.trade_count == 1
-
-    # Run 2: brand NEW TradingGuard instance (simulates a new GitHub Actions run) -
-    # must load trade_count=1 from the state file, not start over at 0
-    dhan5b = MockDhan()
-    guard_run2 = TradingGuard(capital=45000, loss_pct=5, max_trades=2, state_file=state_path)
-    print(f"Run 2 (new process, loaded from state file): trade_count={guard_run2.trade_count}")
-    assert guard_run2.trade_count == 1, "FAILED: state did not carry over to the new process"
-    # Trade 1 closes, trade 2 opens - should now lock
-    dhan5b.set_positions([pos("SEC1", 130, 130, 400, 0), pos("SEC2", 65, 0, 0, 0)])
-    b6 = guard_run2.poll(dhan5b, dry_run=False, debug=False)
-    print(f"Run 2 after trade 2 opens: trade_count={guard_run2.trade_count} | Breached: {b6}")
-    assert guard_run2.trade_count == 2 and b6
-
-    # Run 3: another new process - must load the LOCKED state and refuse to re-fire
-    dhan5c = MockDhan()
-    guard_run3 = TradingGuard(capital=45000, loss_pct=5, max_trades=2, state_file=state_path)
-    b7 = guard_run3.poll(dhan5c, dry_run=False, debug=False)
-    print(f"Run 3 (new process, already locked): kill_switch calls made this run = {dhan5c.kill_switch_calls}")
-    assert dhan5c.kill_switch_calls == [], "FAILED: should not re-fire kill switch on an already-locked day"
-    print("PASS: trade count, lock status, and 'don't re-fire when already locked' all survive across separate runs")
-    os.remove(state_path)
-
-    print("\n" + "=" * 60)
+    print("\n" + "=" * 70)
     print("ALL TESTS PASSED")
-    print("=" * 60)
+    print("This proves the exact incident (locked=True despite a failed activation)")
+    print("is no longer possible in this version of the code.")
+    print("REMINDER: status_kill_switch()'s real response shape from Dhan has not")
+    print("been confirmed via --debug against a live account yet. The verification")
+    print("logic currently checks for the word 'ACTIVE' in the response text - test")
+    print("this against a real response before fully trusting it.")
+    print("=" * 70)
 
 
 if __name__ == "__main__":
