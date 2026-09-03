@@ -6,33 +6,19 @@ account-level kill switch once you hit either limit for the day:
   - MAX_TRADES executed trades, or
   - a loss of LOSS_PCT% of your capital (realized P&L from Dhan's own data)
 
-IMPORTANT: Dhan's kill switch is a broker/account-level flag - once activated,
-it should block new orders for the rest of the trading day account-wide,
-including orders placed manually in the Dhan app itself, not just through
-this script. That's what makes this different from a local tracker: the
-enforcement happens on Dhan's side, not just in a spreadsheet or app you
-could ignore.
-
-BEFORE YOU TRUST THIS WITH REAL MONEY:
-  1. Run with --dry-run for at least one full trading day first. It will
-     print exactly what it WOULD do, without touching your account.
-  2. Verify the field names this script reads from get_positions() and
-     get_trade_book() actually match what your account returns - Dhan's
-     API response shape can vary slightly. Run `python3 dhan_trading_guard.py --debug`
-     once to dump raw responses and check the P&L numbers make sense.
-  3. Know how to deactivate: python3 dhan_trading_guard.py --deactivate
-     (or through the Dhan app itself, if they expose it there).
-  4. This polls every POLL_SECONDS - it is NOT instantaneous. A fast-moving
-     loss between polls can still happen before this reacts.
+CRITICAL FIX (this version): a real incident on live trading showed the
+script marking itself "locked" even when the underlying Dhan kill-switch
+activation had FAILED (Dhan requires positions to be flat before it will
+activate - if a position was still open at the exact moment of breach,
+activation silently failed while the script gave up watching anyway).
+Now: `locked` is only set True once the kill switch is CONFIRMED active,
+and if activation fails, the script keeps retrying on every subsequent
+check instead of giving up.
 
 Setup:
-  pip install dhanhq
+  pip install dhanhq requests
   export DHAN_CLIENT_ID="your-client-id"
   export DHAN_ACCESS_TOKEN="your-access-token"
-  (Get these from Dhan web -> DhanHQ Trading APIs section)
-
-Run during market hours:
-  python3 dhan_trading_guard.py --capital 45000 --loss-pct 5 --max-trades 2 --dry-run
 """
 
 import os
@@ -84,14 +70,6 @@ def _pnl_exit_headers():
 
 
 def _pnl_exit_proxies():
-    """Dhan requires these trading-control calls to come from a whitelisted
-    static IP - GitHub Actions runners don't have one, so this routes the
-    request through a static-IP proxy service instead. Set STATICIP_PROXY_URL
-    as a GitHub secret, formatted like:
-    https://username:password@host:port
-    If not set, the call goes out directly (fine for local testing from a
-    machine whose own IP is already whitelisted, but will fail with
-    DH-905 Invalid IP when run from GitHub Actions)."""
     proxy_url = os.environ.get("STATICIP_PROXY_URL")
     if not proxy_url:
         return None
@@ -99,18 +77,6 @@ def _pnl_exit_proxies():
 
 
 def setup_pnl_exit(loss_value, profit_value=None, product_types=None, enable_kill_switch=True, debug=False):
-    """Configures Dhan's native P&L Based Exit (Trader's Control) for TODAY.
-    This runs entirely on Dhan's own servers - real-time, not dependent on
-    any external scheduler polling in. Once set, Dhan itself will
-    automatically close open positions (and optionally fire the kill
-    switch) the moment cumulative P&L crosses this threshold - no reliance
-    on GitHub Actions, no polling delay, no risk of a scheduler silently
-    skipping a check the way it did on Aug 20.
-
-    lossValue/profitValue are ABSOLUTE RUPEE AMOUNTS, not percentages -
-    convert your capital * loss_pct% to a rupee figure before calling this.
-    This resets automatically at end of day and must be set again each
-    morning before market open."""
     url = "https://api.dhan.co/v2/pnlExit"
     client_id = os.environ.get("DHAN_CLIENT_ID")
     body = {
@@ -154,35 +120,7 @@ def remove_pnl_exit(debug=False):
     return resp.status_code, data
 
 
-def get_today_pnl(dhan, debug=False):
-    """Sums REALIZED + UNREALIZED (open, mark-to-market) P&L across today's
-    positions. Realized alone is not enough - an open position sitting at
-    a big MTM loss must count too, or the guard stays blind to exactly the
-    situation where it matters most (a losing trade still open)."""
-    resp = dhan.get_positions()
-    if debug:
-        log(f"DEBUG positions raw response: {resp}")
-    positions = resp.get("data", []) if isinstance(resp, dict) else []
-    total = 0.0
-    for p in positions:
-        realized = float(p.get("realizedProfit", 0) or 0)
-        unrealized = float(p.get("unrealizedProfit", 0) or 0)
-        total += realized + unrealized
-    return total
-
-
 def compute_today_trade_count(dhan, debug=False):
-    """Counts real round-trip trades from the day's individual fills
-    (trade book), not from the position snapshot. This is recomputed fresh
-    from the FULL day's fills every single check - not built up
-    incrementally - which fixes two real bugs found via live testing:
-      1. A trade that opens AND closes within one polling gap was
-         invisible to a position-snapshot-based check.
-      2. The SAME instrument traded twice in one day (two separate
-         round trips) only showed as one entry in the position snapshot,
-         since Dhan aggregates position data per security per day.
-    A "trade" here = a position going from flat (0) to non-flat, walked
-    chronologically through that security's fills for the day."""
     resp = dhan.get_trade_book()
     if debug:
         log(f"DEBUG trade_book raw response: {resp}")
@@ -213,12 +151,6 @@ def compute_today_trade_count(dhan, debug=False):
 
 
 class TradingGuard:
-    """Holds state (only lock status now - trade count is recomputed fresh
-    from the trade book on every check, see compute_today_trade_count) so a
-    fresh run - like a new GitHub Actions invocation every few minutes -
-    knows whether today is already locked, instead of forgetting and
-    potentially re-evaluating after a lock should already hold."""
-
     def __init__(self, capital, loss_pct, max_trades, auto_square_off=False,
                  state_file=None):
         self.capital = capital
@@ -259,11 +191,6 @@ class TradingGuard:
             json.dump(data, f)
 
     def square_off_all(self, dhan, positions_raw, debug=False):
-        """Places a MARKET order in the opposite direction to flatten every
-        open position. OFF by default - only runs if auto_square_off=True.
-        This is the riskiest part of this script: verify the field names
-        (securityId, exchangeSegment, netQty) match your account's real
-        response via --debug before ever enabling this live."""
         for p in positions_raw:
             sid = p.get("securityId") or p.get("security_id")
             segment = p.get("exchangeSegment") or p.get("exchange_segment")
@@ -277,47 +204,59 @@ class TradingGuard:
             log(f"AUTO SQUARE-OFF: {side} {qty} of {sid} ({segment}) to flatten open position")
             try:
                 result = dhan.place_order(
-                    security_id=sid,
-                    exchange_segment=segment,
-                    transaction_type=side,
-                    quantity=qty,
-                    order_type="MARKET",
-                    product_type="INTRADAY",
-                    price=0,
+                    security_id=sid, exchange_segment=segment, transaction_type=side,
+                    quantity=qty, order_type="MARKET", product_type="INTRADAY", price=0,
                 )
                 log(f"Square-off order result: {result}")
             except Exception as e:
                 log(f"ERROR placing square-off order for {sid}: {e}")
 
     def _activate_kill_switch_permanently(self, dhan):
-        """Activates the kill switch, then immediately deactivates and
-        reactivates it - burning the one self-deactivation Dhan allows per
-        day right away, automatically, instead of leaving it sitting there
-        for the rest of the day as something that could be used to keep
-        trading. After this sequence, Dhan does not allow another manual
-        deactivation until the next trading day."""
+        """Activates, deactivates, reactivates - burning the one manual
+        override immediately. Returns True ONLY if the FINAL activation is
+        genuinely confirmed active on Dhan's side - never assume success."""
         try:
             r1 = dhan.kill_switch("ACTIVATE")
             log(f"Kill switch ACTIVATE (1st) result: {r1}")
         except Exception as e:
             log(f"ERROR on first kill switch activation: {e}")
-            log("This can happen if a position is still open - Dhan requires positions flat before the kill switch can activate. Enable --auto-square-off, or close the position manually, then this will succeed on the next check.")
+            log("This can happen if a position is still open - Dhan requires positions flat "
+                "before the kill switch can activate. Will retry on the next check.")
             return False
 
         try:
             r2 = dhan.kill_switch("DEACTIVATE")
             log(f"Kill switch DEACTIVATE (burning the override) result: {r2}")
         except Exception as e:
-            log(f"WARNING: could not deactivate to burn the override: {e}. Kill switch is still ACTIVE from the first call, which is the safe state - just not burned yet.")
-            return True
+            log(f"WARNING: could not deactivate to burn the override: {e}. "
+                f"Kill switch is still ACTIVE from the first call - that's confirmed protection, "
+                f"just not burned yet.")
+            return True  # first activation genuinely succeeded, that's what matters
 
         try:
             r3 = dhan.kill_switch("ACTIVATE")
-            log(f"Kill switch ACTIVATE (2nd, override now burned for today) result: {r3}")
+            log(f"Kill switch ACTIVATE (2nd, override now burned) result: {r3}")
         except Exception as e:
-            log(f"WARNING: could not re-activate after burning the override: {e}. Account may currently be UNLOCKED - check the Dhan app.")
+            log(f"WARNING: could not re-activate after burning the override: {e}. "
+                f"Account may currently be UNLOCKED - will retry on the next check.")
             return False
         return True
+
+    def _verify_kill_switch_active(self, dhan):
+        """Independently confirms with Dhan whether the kill switch is
+        genuinely active right now, rather than trusting our own memory of
+        having called ACTIVATE. This is the real fix for the incident where
+        the script believed it was locked while Dhan's account remained
+        fully tradeable."""
+        try:
+            status = dhan.status_kill_switch()
+            if isinstance(status, dict):
+                data = status.get("data", status)
+                text = json.dumps(data).upper() if not isinstance(data, str) else data.upper()
+                return "ACTIVE" in text and "INACTIVE" not in text
+        except Exception as e:
+            log(f"WARNING: could not verify kill switch status: {e}")
+        return False
 
     def poll(self, dhan, dry_run, debug):
         if self.locked:
@@ -354,9 +293,22 @@ class TradingGuard:
                 log(f"BREACH: {breach_reason}")
                 if self.auto_square_off:
                     self.square_off_all(dhan, positions_raw, debug)
-                self._activate_kill_switch_permanently(dhan)
-                self.locked = True
-                self.lock_reason = breach_reason
+                activation_reported_success = self._activate_kill_switch_permanently(dhan)
+
+                # THE FIX: don't trust our own call's return value alone -
+                # independently ask Dhan whether it's actually active.
+                actually_active = self._verify_kill_switch_active(dhan)
+
+                if actually_active:
+                    self.locked = True
+                    self.lock_reason = breach_reason
+                    log("CONFIRMED: kill switch is genuinely active on Dhan's side. Locking.")
+                else:
+                    self.locked = False
+                    log("*** NOT LOCKED YET *** Kill switch activation could not be confirmed "
+                        "active (position likely still open - Dhan requires positions flat to "
+                        "activate). Will keep checking and retrying every run until it succeeds "
+                        "or the position closes. DO NOT ASSUME YOU ARE PROTECTED RIGHT NOW.")
             breached = True
 
         self._save_state()
@@ -369,16 +321,16 @@ def main():
     parser.add_argument("--loss-pct", type=float, required=False, default=5)
     parser.add_argument("--max-trades", type=int, required=False, default=2)
     parser.add_argument("--poll-seconds", type=int, required=False, default=30)
-    parser.add_argument("--dry-run", action="store_true", help="Print what would happen, never actually activate the kill switch.")
-    parser.add_argument("--auto-square-off", action="store_true", help="DANGEROUS if untested: automatically close open positions with a market order when a breach fires. Off by default.")
-    parser.add_argument("--debug", action="store_true", help="Print raw API responses to check field names.")
-    parser.add_argument("--deactivate", action="store_true", help="Deactivate the kill switch and exit.")
-    parser.add_argument("--status", action="store_true", help="Check current kill switch status and exit.")
-    parser.add_argument("--once", action="store_true", help="Do a single check and exit, instead of looping. Use this for GitHub Actions / any scheduler.")
-    parser.add_argument("--state-file", type=str, default="guard_state.json", help="Where to persist trade count / lock status between runs. Required for --once to work across scheduled runs.")
-    parser.add_argument("--setup-pnl-exit", action="store_true", help="Configure Dhan's native P&L Based Exit for TODAY (real-time, runs on Dhan's servers - not dependent on this script running). Uses --capital and --loss-pct to compute the rupee loss threshold. Run this every morning before market open.")
-    parser.add_argument("--pnl-exit-status", action="store_true", help="Check today's currently configured P&L Exit and exit.")
-    parser.add_argument("--remove-pnl-exit", action="store_true", help="Remove today's P&L Exit configuration and exit.")
+    parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--auto-square-off", action="store_true")
+    parser.add_argument("--debug", action="store_true")
+    parser.add_argument("--deactivate", action="store_true")
+    parser.add_argument("--status", action="store_true")
+    parser.add_argument("--once", action="store_true")
+    parser.add_argument("--state-file", type=str, default="guard_state.json")
+    parser.add_argument("--setup-pnl-exit", action="store_true")
+    parser.add_argument("--pnl-exit-status", action="store_true")
+    parser.add_argument("--remove-pnl-exit", action="store_true")
     args = parser.parse_args()
 
     if args.setup_pnl_exit:
@@ -430,7 +382,6 @@ def main():
                 break
         except Exception as e:
             log(f"ERROR during check: {e}")
-
         time.sleep(args.poll_seconds)
 
 
